@@ -4,4 +4,4 @@ pub mod mmap;
 /// SQLite persistence for vector records and collection metadata.
 pub mod sqlite;
 
-pub use sqlite::SqliteStore;
+pub use sqlite::{SqliteStore, VectorStore};

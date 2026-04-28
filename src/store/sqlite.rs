@@ -4,77 +4,96 @@ use std::path::Path;
 use uuid::Uuid;
 
 use crate::{
-    error::VectorResult,
+    error::{VectorError, VectorResult},
     types::{Collection, VectorRecord},
 };
 
 /// Manages all SQLite read/write operations for collections and vector records.
-pub struct SqliteStore {
+pub struct VectorStore {
     pool: SqlitePool,
 }
 
-impl SqliteStore {
+/// Backward-compatible alias for [`VectorStore`].
+pub type SqliteStore = VectorStore;
+
+impl VectorStore {
     /// Open (or create) the SQLite database at `path`, applying schema migrations.
-    pub async fn open(path: &Path) -> VectorResult<Self> {
+    pub async fn new(path: &Path) -> VectorResult<Self> {
         let opts = SqliteConnectOptions::new()
             .filename(path)
             .create_if_missing(true);
         let pool = SqlitePool::connect_with(opts).await?;
-        let store = SqliteStore { pool };
-        store.run_migrations().await?;
+        let store = VectorStore { pool };
+        sqlx::migrate!().run(&store.pool).await.map_err(|e| VectorError::Store(e.into()))?;
         Ok(store)
     }
 
-    async fn run_migrations(&self) -> VectorResult<()> {
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS collections (
-                name             TEXT PRIMARY KEY NOT NULL,
-                dimensions       INTEGER NOT NULL,
-                distance         TEXT NOT NULL,
-                index_type       TEXT NOT NULL,
-                created_at       TEXT NOT NULL,
-                vector_count     INTEGER NOT NULL DEFAULT 0,
-                metadata         TEXT NOT NULL DEFAULT 'null',
-                ef_construction  INTEGER NOT NULL DEFAULT 200,
-                m_connections    INTEGER NOT NULL DEFAULT 16
-            );
-            CREATE TABLE IF NOT EXISTS vector_records (
-                id          TEXT PRIMARY KEY NOT NULL,
-                collection  TEXT NOT NULL,
-                vector      BLOB NOT NULL,
-                metadata    TEXT NOT NULL DEFAULT 'null',
-                text        TEXT,
-                created_at  TEXT NOT NULL,
-                FOREIGN KEY (collection) REFERENCES collections(name)
-            );
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+    /// Alias for [`VectorStore::new`].
+    pub async fn open(path: &Path) -> VectorResult<Self> {
+        Self::new(path).await
     }
 
     /// Persist a new collection definition (upsert).
-    pub async fn save_collection(&self, col: &Collection) -> VectorResult<()> {
+    pub async fn create_collection(&self, col: &Collection) -> VectorResult<()> {
         sqlx::query(
             r#"INSERT OR REPLACE INTO collections
-               (name, dimensions, distance, index_type, created_at, vector_count, metadata,
-                ef_construction, m_connections)
+               (name, dimensions, distance, index_type, ef_construction, m_connections,
+                created_at, vector_count, metadata)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
         )
         .bind(&col.name)
         .bind(col.dimensions as i64)
         .bind(serde_json::to_string(&col.distance)?)
         .bind(serde_json::to_string(&col.index_type)?)
+        .bind(col.ef_construction as i64)
+        .bind(col.m_connections as i64)
         .bind(col.created_at.to_rfc3339())
         .bind(col.vector_count as i64)
         .bind(serde_json::to_string(&col.metadata)?)
-        .bind(col.ef_construction as i64)
-        .bind(col.m_connections as i64)
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Alias for [`VectorStore::create_collection`].
+    pub async fn save_collection(&self, col: &Collection) -> VectorResult<()> {
+        self.create_collection(col).await
+    }
+
+    /// Retrieve a collection by name.
+    pub async fn get_collection(&self, name: &str) -> VectorResult<Collection> {
+        type Row = (String, i64, String, String, i64, i64, String, i64, String);
+        let row = sqlx::query_as::<_, Row>(
+            "SELECT name, dimensions, distance, index_type, ef_construction, m_connections, \
+             created_at, vector_count, metadata FROM collections WHERE name = ?",
+        )
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match row {
+            Some((name, dimensions, distance, index_type, ef_construction, m_connections,
+                  created_at, vector_count, metadata)) =>
+            {
+                Ok(Collection {
+                    name,
+                    dimensions: dimensions as usize,
+                    distance: serde_json::from_str(&distance)?,
+                    index_type: serde_json::from_str(&index_type)?,
+                    ef_construction: ef_construction as usize,
+                    m_connections: m_connections as usize,
+                    created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
+                        .map_err(|e| VectorError::Index(format!("invalid timestamp in DB: {e}")))?
+                        .with_timezone(&chrono::Utc),
+                    vector_count: vector_count as u64,
+                    metadata: serde_json::from_str(&metadata)?,
+                })
+            }
+            None => Err(VectorError::NotFound {
+                entity: "collection".into(),
+                id: name.to_string(),
+            }),
+        }
     }
 
     /// Delete a collection by name.
@@ -86,49 +105,71 @@ impl SqliteStore {
         Ok(())
     }
 
-    /// List all collection names.
-    pub async fn list_collections(&self) -> VectorResult<Vec<serde_json::Value>> {
-        let rows = sqlx::query_as::<_, (String,)>("SELECT name FROM collections ORDER BY name")
-            .fetch_all(&self.pool)
-            .await?;
-        Ok(rows.into_iter().map(|(n,)| serde_json::json!({ "name": n })).collect())
+    /// List all collections.
+    pub async fn list_collections(&self) -> VectorResult<Vec<Collection>> {
+        type Row = (String, i64, String, String, i64, i64, String, i64, String);
+        let rows = sqlx::query_as::<_, Row>(
+            "SELECT name, dimensions, distance, index_type, ef_construction, m_connections, \
+             created_at, vector_count, metadata FROM collections ORDER BY name",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|(name, dimensions, distance, index_type, ef_construction, m_connections,
+                   created_at, vector_count, metadata)| {
+                Ok(Collection {
+                    name,
+                    dimensions: dimensions as usize,
+                    distance: serde_json::from_str(&distance)?,
+                    index_type: serde_json::from_str(&index_type)?,
+                    ef_construction: ef_construction as usize,
+                    m_connections: m_connections as usize,
+                    created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
+                        .map_err(|e| VectorError::Index(format!("invalid timestamp in DB: {e}")))?
+                        .with_timezone(&chrono::Utc),
+                    vector_count: vector_count as u64,
+                    metadata: serde_json::from_str(&metadata)?,
+                })
+            })
+            .collect()
     }
 
-    /// Persist a vector record (upsert).
-    pub async fn save_record(&self, record: &VectorRecord) -> VectorResult<()> {
-        let vector_bytes = encode_f32_slice(&record.vector);
+    /// Persist a vector record (upsert), linking it to the given `internal_id`.
+    pub async fn save_record(&self, record: &VectorRecord, internal_id: usize) -> VectorResult<()> {
         sqlx::query(
             r#"INSERT OR REPLACE INTO vector_records
-               (id, collection, vector, metadata, text, created_at)
+               (id, internal_id, collection, text, metadata, created_at)
                VALUES (?, ?, ?, ?, ?, ?)"#,
         )
         .bind(record.id.to_string())
+        .bind(internal_id as i64)
         .bind(&record.collection)
-        .bind(vector_bytes)
-        .bind(serde_json::to_string(&record.metadata)?)
         .bind(&record.text)
+        .bind(serde_json::to_string(&record.metadata)?)
         .bind(record.created_at.to_rfc3339())
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    /// Retrieve a single vector record by id.
+    /// Retrieve a single vector record's metadata by id.
     pub async fn get_record(&self, id: Uuid) -> VectorResult<Option<serde_json::Value>> {
-        let row = sqlx::query_as::<_, (String, String, Vec<u8>, String, Option<String>, String)>(
-            "SELECT id, collection, vector, metadata, text, created_at FROM vector_records WHERE id = ?",
+        let row = sqlx::query_as::<_, (String, i64, String, Option<String>, String, String)>(
+            "SELECT id, internal_id, collection, text, metadata, created_at \
+             FROM vector_records WHERE id = ?",
         )
         .bind(id.to_string())
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(row.map(|(id, collection, vec_bytes, metadata, text, created_at)| {
+        Ok(row.map(|(id, internal_id, collection, text, metadata, created_at)| {
             serde_json::json!({
                 "id": id,
+                "internal_id": internal_id,
                 "collection": collection,
-                "vector": decode_f32_slice(&vec_bytes),
-                "metadata": metadata,
                 "text": text,
+                "metadata": metadata,
                 "created_at": created_at,
             })
         }))
@@ -142,23 +183,4 @@ impl SqliteStore {
             .await?;
         Ok(result.rows_affected() > 0)
     }
-}
-
-fn encode_f32_slice(values: &[f32]) -> Vec<u8> {
-    use byteorder::{LittleEndian, WriteBytesExt};
-    let mut buf = Vec::with_capacity(values.len() * 4);
-    for &v in values {
-        buf.write_f32::<LittleEndian>(v).unwrap();
-    }
-    buf
-}
-
-fn decode_f32_slice(bytes: &[u8]) -> Vec<f32> {
-    use byteorder::{LittleEndian, ReadBytesExt};
-    let mut cursor = std::io::Cursor::new(bytes);
-    let mut result = Vec::with_capacity(bytes.len() / 4);
-    while let Ok(v) = cursor.read_f32::<LittleEndian>() {
-        result.push(v);
-    }
-    result
 }
