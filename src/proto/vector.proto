@@ -1,0 +1,64 @@
+// vector.proto — gRPC contract between the Rust vector engine and the Python embedding service.
+syntax = "proto3";
+
+package clawvector.v1;
+
+// ─── Messages ────────────────────────────────────────────────────────────────
+
+// Request to embed one or more text strings.
+message EmbedRequest {
+  repeated string texts = 1;
+  string model_name = 2;
+  bool normalize = 3;
+}
+
+// A single dense embedding vector.
+message EmbedVector {
+  repeated float values = 1;
+  int32 dimensions = 2;
+}
+
+// Response containing one EmbedVector per input text.
+message EmbedResponse {
+  repeated EmbedVector vectors = 1;
+  string model_name = 2;
+  int64 latency_ms = 3;
+}
+
+// Health probe request (no fields required).
+message HealthRequest {}
+
+// Health probe response.
+message HealthResponse {
+  bool ready = 1;
+  string model_name = 2;
+  int64 model_load_time_ms = 3;
+}
+
+// Request for model metadata (no fields required).
+message ModelInfoRequest {}
+
+// Model metadata response.
+message ModelInfoResponse {
+  string model_name = 1;
+  int32 dimensions = 2;
+  int64 max_sequence_length = 3;
+  string device = 4;
+}
+
+// ─── Service ─────────────────────────────────────────────────────────────────
+
+// EmbeddingService: generates dense embeddings for arbitrary text inputs.
+service EmbeddingService {
+  // Embed a batch of texts in a single round-trip.
+  rpc Embed(EmbedRequest) returns (EmbedResponse);
+
+  // Check whether the model is loaded and the service is ready.
+  rpc Health(HealthRequest) returns (HealthResponse);
+
+  // Return metadata about the currently loaded model.
+  rpc ModelInfo(ModelInfoRequest) returns (ModelInfoResponse);
+
+  // Bidirectional streaming embed for large or continuous workloads.
+  rpc EmbedStream(stream EmbedRequest) returns (stream EmbedResponse);
+}
