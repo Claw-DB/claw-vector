@@ -72,23 +72,7 @@ impl VectorStore {
         .await?;
 
         match row {
-            Some((name, dimensions, distance, index_type, ef_construction, m_connections,
-                  created_at, vector_count, metadata)) =>
-            {
-                Ok(Collection {
-                    name,
-                    dimensions: dimensions as usize,
-                    distance: serde_json::from_str(&distance)?,
-                    index_type: serde_json::from_str(&index_type)?,
-                    ef_construction: ef_construction as usize,
-                    m_connections: m_connections as usize,
-                    created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
-                        .map_err(|e| VectorError::Index(format!("invalid timestamp in DB: {e}")))?
-                        .with_timezone(&chrono::Utc),
-                    vector_count: vector_count as u64,
-                    metadata: serde_json::from_str(&metadata)?,
-                })
-            }
+            Some(row) => collection_from_row(row),
             None => Err(VectorError::NotFound {
                 entity: "collection".into(),
                 id: name.to_string(),
@@ -115,24 +99,7 @@ impl VectorStore {
         .fetch_all(&self.pool)
         .await?;
 
-        rows.into_iter()
-            .map(|(name, dimensions, distance, index_type, ef_construction, m_connections,
-                   created_at, vector_count, metadata)| {
-                Ok(Collection {
-                    name,
-                    dimensions: dimensions as usize,
-                    distance: serde_json::from_str(&distance)?,
-                    index_type: serde_json::from_str(&index_type)?,
-                    ef_construction: ef_construction as usize,
-                    m_connections: m_connections as usize,
-                    created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
-                        .map_err(|e| VectorError::Index(format!("invalid timestamp in DB: {e}")))?
-                        .with_timezone(&chrono::Utc),
-                    vector_count: vector_count as u64,
-                    metadata: serde_json::from_str(&metadata)?,
-                })
-            })
-            .collect()
+        rows.into_iter().map(collection_from_row).collect()
     }
 
     /// Persist a vector record (upsert), linking it to the given `internal_id`.
@@ -183,4 +150,24 @@ impl VectorStore {
             .await?;
         Ok(result.rows_affected() > 0)
     }
+}
+
+/// Convert a raw database row into a [`Collection`], parsing JSON and RFC-3339 fields.
+fn collection_from_row(
+    (name, dimensions, distance, index_type, ef_construction, m_connections,
+     created_at, vector_count, metadata): (String, i64, String, String, i64, i64, String, i64, String),
+) -> VectorResult<Collection> {
+    Ok(Collection {
+        name,
+        dimensions: dimensions as usize,
+        distance: serde_json::from_str(&distance)?,
+        index_type: serde_json::from_str(&index_type)?,
+        ef_construction: ef_construction as usize,
+        m_connections: m_connections as usize,
+        created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
+            .map_err(|e| VectorError::Index(format!("invalid timestamp in DB: {e}")))?
+            .with_timezone(&chrono::Utc),
+        vector_count: vector_count as u64,
+        metadata: serde_json::from_str(&metadata)?,
+    })
 }
