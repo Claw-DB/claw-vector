@@ -92,25 +92,31 @@ impl VectorEngine {
     #[instrument(skip_all)]
     pub async fn insert(&self, record: VectorRecord) -> VectorResult<uuid::Uuid> {
         let id = record.id;
-        self.store.save_record(&record).await?;
 
-        let cols = self.collections.read().map_err(|e| VectorError::Index(e.to_string()))?;
-        let state_lock = cols.get(&record.collection).ok_or_else(|| VectorError::Collection {
-            name: record.collection.clone(),
-            reason: "not found".into(),
-        })?;
-        let mut state = state_lock.write().map_err(|e| VectorError::Index(e.to_string()))?;
-        let internal_id = state.next_id;
-        state.next_id += 1;
-        let search_result = SearchResult {
-            id: record.id,
-            score: 0.0,
-            vector: Some(record.vector.clone()),
-            metadata: record.metadata.clone(),
-            text: record.text.clone(),
+        // Acquire the write lock, compute internal_id, and update in-memory state.
+        // The lock guards must be dropped before any `.await` point.
+        let internal_id = {
+            let cols = self.collections.read().map_err(|e| VectorError::Index(e.to_string()))?;
+            let state_lock = cols.get(&record.collection).ok_or_else(|| VectorError::Collection {
+                name: record.collection.clone(),
+                reason: "not found".into(),
+            })?;
+            let mut state = state_lock.write().map_err(|e| VectorError::Index(e.to_string()))?;
+            let internal_id = state.next_id;
+            state.next_id += 1;
+            let search_result = SearchResult {
+                id: record.id,
+                score: 0.0,
+                vector: Some(record.vector.clone()),
+                metadata: record.metadata.clone(),
+                text: record.text.clone(),
+            };
+            state.record_map.insert(internal_id, search_result);
+            state.index.insert(internal_id, record.vector.clone(), &self.config)?;
+            internal_id
         };
-        state.record_map.insert(internal_id, search_result);
-        state.index.insert(internal_id, record.vector, &self.config)?;
+
+        self.store.save_record(&record, internal_id).await?;
         Ok(id)
     }
 

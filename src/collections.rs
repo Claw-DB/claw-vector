@@ -27,7 +27,7 @@ impl CollectionManager {
     }
 
     /// List all collections known to the store.
-    pub async fn list(&self) -> VectorResult<Vec<serde_json::Value>> {
+    pub async fn list(&self) -> VectorResult<Vec<Collection>> {
         self.engine.store().list_collections().await
     }
 }
