@@ -1,0 +1,46 @@
+version: "3.9"
+
+services:
+  claw-vector-svc:
+    build:
+      context: ./python
+    container_name: claw-vector-svc
+    environment:
+      MODEL_NAME: ${MODEL_NAME:-sentence-transformers/all-MiniLM-L6-v2}
+      DEVICE: ${DEVICE:-cpu}
+      GRPC_PORT: ${GRPC_PORT:-50051}
+      HTTP_PORT: ${HTTP_PORT:-8080}
+      MAX_BATCH_SIZE: ${MAX_BATCH_SIZE:-64}
+    ports:
+      - "50051:50051"
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    volumes:
+      - model-cache:/root/.cache/huggingface
+    networks:
+      - claw-net
+
+  claw-vector-dev:
+    image: rust:1.81-bookworm
+    container_name: claw-vector-dev
+    profiles: ["dev"]
+    working_dir: /workspace
+    command: ["bash", "-lc", "tail -f /dev/null"]
+    volumes:
+      - .:/workspace
+      - model-cache:/root/.cache/huggingface
+    networks:
+      - claw-net
+
+volumes:
+  model-cache:
+
+networks:
+  claw-net:
+    driver: bridge
