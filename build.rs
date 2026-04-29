@@ -7,10 +7,13 @@
 //     src/proto/vector.proto
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let protoc = protoc_bin_vendored::protoc_bin_path()?;
+    std::env::set_var("PROTOC", protoc);
+
     tonic_build::configure()
         .build_server(true)
         .build_client(true)
-        .compile(&["src/proto/vector.proto"], &["src/proto"])?;
+        .compile_protos(&["src/proto/vector.proto"], &["src/proto"])?;
 
     println!("cargo:rerun-if-changed=src/proto/vector.proto");
     println!("cargo:rerun-if-changed=src/proto");
