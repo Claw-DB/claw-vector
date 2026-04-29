@@ -32,6 +32,7 @@ pub use config::{VectorConfig, VectorConfigBuilder};
 pub use engine::VectorEngine;
 pub use error::{VectorError, VectorResult};
 pub use types::{
-    Collection, DistanceMetric, IndexType, MetadataFilter, SearchQuery, SearchResult,
+    Collection, CollectionStats, DistanceMetric, EngineStats, HybridQuery, IndexType,
+    MetadataFilter, RerankerConfig, SearchMetrics, SearchQuery, SearchResponse, SearchResult,
     VectorRecord,
 };

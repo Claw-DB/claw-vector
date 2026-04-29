@@ -127,7 +127,13 @@ impl HnswIndex {
         distance: DistanceMetric,
         dimensions: usize,
     ) -> VectorResult<Self> {
-        let inner = build_inner(config.m_connections, config.max_elements, 16, config.ef_construction, distance);
+        let inner = build_inner(
+            config.m_connections,
+            config.max_elements,
+            16,
+            config.ef_construction,
+            distance,
+        );
         Ok(HnswIndex {
             inner,
             points: RwLock::new(HashMap::new()),
@@ -143,10 +149,16 @@ impl HnswIndex {
     #[instrument(skip(self, vector))]
     pub fn insert(&self, id: usize, vector: &[f32]) -> VectorResult<()> {
         if vector.len() != self.dimensions {
-            return Err(VectorError::DimensionMismatch { expected: self.dimensions, got: vector.len() });
+            return Err(VectorError::DimensionMismatch {
+                expected: self.dimensions,
+                got: vector.len(),
+            });
         }
         self.inner.insert(id, vector);
-        self.points.write().map_err(|e| VectorError::Index(e.to_string()))?.insert(id, vector.to_vec());
+        self.points
+            .write()
+            .map_err(|e| VectorError::Index(e.to_string()))?
+            .insert(id, vector.to_vec());
         self.element_count.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
@@ -156,12 +168,18 @@ impl HnswIndex {
     pub fn insert_batch(&self, items: &[(usize, Vec<f32>)]) -> VectorResult<()> {
         for (_, v) in items {
             if v.len() != self.dimensions {
-                return Err(VectorError::DimensionMismatch { expected: self.dimensions, got: v.len() });
+                return Err(VectorError::DimensionMismatch {
+                    expected: self.dimensions,
+                    got: v.len(),
+                });
             }
         }
         let refs: Vec<(&Vec<f32>, usize)> = items.iter().map(|(id, v)| (v, *id)).collect();
         self.inner.parallel_insert(&refs);
-        let mut pts = self.points.write().map_err(|e| VectorError::Index(e.to_string()))?;
+        let mut pts = self
+            .points
+            .write()
+            .map_err(|e| VectorError::Index(e.to_string()))?;
         for (id, v) in items {
             pts.insert(*id, v.clone());
         }
@@ -173,11 +191,22 @@ impl HnswIndex {
     ///
     /// Returns `(internal_id, distance)` pairs sorted by ascending distance.
     #[instrument(skip(self, query))]
-    pub fn search(&self, query: &[f32], top_k: usize, ef_search: usize) -> VectorResult<Vec<(usize, f32)>> {
+    pub fn search(
+        &self,
+        query: &[f32],
+        top_k: usize,
+        ef_search: usize,
+    ) -> VectorResult<Vec<(usize, f32)>> {
         if query.len() != self.dimensions {
-            return Err(VectorError::DimensionMismatch { expected: self.dimensions, got: query.len() });
+            return Err(VectorError::DimensionMismatch {
+                expected: self.dimensions,
+                got: query.len(),
+            });
         }
-        let deleted = self.deleted.read().map_err(|e| VectorError::Index(e.to_string()))?;
+        let deleted = self
+            .deleted
+            .read()
+            .map_err(|e| VectorError::Index(e.to_string()))?;
         let neighbours = self.inner.search(query, top_k + deleted.len(), ef_search);
         let mut results: Vec<(usize, f32)> = neighbours
             .into_iter()
@@ -192,9 +221,15 @@ impl HnswIndex {
     /// Mark a vector as deleted (tombstone — hnsw_rs does not support physical removal).
     #[instrument(skip(self))]
     pub fn delete(&self, id: usize) -> VectorResult<()> {
-        let mut deleted = self.deleted.write().map_err(|e| VectorError::Index(e.to_string()))?;
+        let mut deleted = self
+            .deleted
+            .write()
+            .map_err(|e| VectorError::Index(e.to_string()))?;
         if deleted.insert(id) {
-            self.points.write().map_err(|e| VectorError::Index(e.to_string()))?.remove(&id);
+            self.points
+                .write()
+                .map_err(|e| VectorError::Index(e.to_string()))?
+                .remove(&id);
             self.element_count.fetch_sub(1, Ordering::Relaxed);
         }
         Ok(())
@@ -216,7 +251,10 @@ impl HnswIndex {
     #[instrument(skip(self))]
     pub fn save(&self, path: &Path) -> VectorResult<()> {
         std::fs::create_dir_all(path)?;
-        let pts = self.points.read().map_err(|e| VectorError::Index(e.to_string()))?;
+        let pts = self
+            .points
+            .read()
+            .map_err(|e| VectorError::Index(e.to_string()))?;
         let meta = serde_json::json!({
             "distance": self.distance,
             "dimensions": self.dimensions,
@@ -240,13 +278,20 @@ impl HnswIndex {
 
     /// Reload a previously saved index by re-inserting all persisted points.
     #[instrument(skip(config))]
-    pub fn load(path: &Path, config: &VectorConfig, distance: DistanceMetric) -> VectorResult<Self> {
+    pub fn load(
+        path: &Path,
+        config: &VectorConfig,
+        distance: DistanceMetric,
+    ) -> VectorResult<Self> {
         let meta: serde_json::Value =
             serde_json::from_reader(std::fs::File::open(path.join("hnsw.meta.json"))?)?;
         let dimensions = meta["dimensions"]
             .as_u64()
-            .ok_or_else(|| VectorError::Index("missing dimensions".into()))? as usize;
-        let max_elements = meta["max_elements"].as_u64().unwrap_or(config.max_elements as u64) as usize;
+            .ok_or_else(|| VectorError::Index("missing dimensions".into()))?
+            as usize;
+        let max_elements = meta["max_elements"]
+            .as_u64()
+            .unwrap_or(config.max_elements as u64) as usize;
 
         let raw = std::fs::read(path.join("hnsw.points.bin"))?;
         let points = decode_points_bin(&raw, dimensions)?;
@@ -271,11 +316,23 @@ impl HnswIndex {
     }
 }
 
-fn build_inner(m: usize, max_elem: usize, max_layer: usize, ef_c: usize, distance: DistanceMetric) -> HnswInner {
+fn build_inner(
+    m: usize,
+    max_elem: usize,
+    max_layer: usize,
+    ef_c: usize,
+    distance: DistanceMetric,
+) -> HnswInner {
     match distance {
-        DistanceMetric::Euclidean => HnswInner::L2(Hnsw::new(m, max_elem, max_layer, ef_c, DistL2 {})),
-        DistanceMetric::Cosine => HnswInner::Cosine(Hnsw::new(m, max_elem, max_layer, ef_c, DistCosine {})),
-        DistanceMetric::DotProduct => HnswInner::Dot(Hnsw::new(m, max_elem, max_layer, ef_c, DistDot {})),
+        DistanceMetric::Euclidean => {
+            HnswInner::L2(Hnsw::new(m, max_elem, max_layer, ef_c, DistL2 {}))
+        }
+        DistanceMetric::Cosine => {
+            HnswInner::Cosine(Hnsw::new(m, max_elem, max_layer, ef_c, DistCosine {}))
+        }
+        DistanceMetric::DotProduct => {
+            HnswInner::Dot(Hnsw::new(m, max_elem, max_layer, ef_c, DistDot {}))
+        }
     }
 }
 

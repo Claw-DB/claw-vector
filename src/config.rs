@@ -1,6 +1,6 @@
 // config.rs — VectorConfig with full builder pattern, defaults, validation, and env loading.
-use std::{path::PathBuf, num::NonZeroUsize};
 use serde::{Deserialize, Serialize};
+use std::{num::NonZeroUsize, path::PathBuf};
 
 use crate::error::{VectorError, VectorResult};
 
@@ -84,17 +84,9 @@ impl VectorConfig {
 // ─── Builder ─────────────────────────────────────────────────────────────────
 
 /// Fluent builder for [`VectorConfig`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct VectorConfigBuilder {
     inner: VectorConfig,
-}
-
-impl Default for VectorConfigBuilder {
-    fn default() -> Self {
-        VectorConfigBuilder {
-            inner: VectorConfig::default(),
-        }
-    }
 }
 
 impl VectorConfigBuilder {

@@ -1,55 +1,71 @@
 // embeddings/cache.rs — LRU cache for embedding vectors keyed by text.
-use std::collections::HashMap;
+use std::num::NonZeroUsize;
 
-/// A simple LRU cache that stores embedding vectors keyed by the original text.
+use lru::LruCache;
+use sha2::{Digest, Sha256};
+
+/// Snapshot of embedding cache statistics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct EmbeddingCacheStats {
+    /// Number of cache hits.
+    pub hit_count: u64,
+    /// Number of cache misses.
+    pub miss_count: u64,
+    /// Number of cached entries.
+    pub len: usize,
+}
+
+/// LRU cache for embedding vectors keyed by a SHA-256 hash of the input text.
 pub struct EmbeddingCache {
-    map: HashMap<String, Vec<f32>>,
-    order: std::collections::VecDeque<String>,
-    capacity: usize,
+    /// Inner LRU cache mapping text digests to embeddings.
+    pub inner: LruCache<String, Vec<f32>>,
+    /// Number of cache hits.
+    pub hit_count: u64,
+    /// Number of cache misses.
+    pub miss_count: u64,
 }
 
 impl EmbeddingCache {
     /// Create a new cache with the given maximum capacity.
     pub fn new(capacity: usize) -> Self {
+        let capacity = NonZeroUsize::new(capacity.max(1)).unwrap();
         EmbeddingCache {
-            map: HashMap::with_capacity(capacity),
-            order: std::collections::VecDeque::with_capacity(capacity),
-            capacity,
+            inner: LruCache::new(capacity),
+            hit_count: 0,
+            miss_count: 0,
         }
+    }
+
+    /// Compute the cache key for an input text.
+    pub fn key(text: &str) -> String {
+        let digest = Sha256::digest(text.as_bytes());
+        hex::encode(digest)
     }
 
     /// Look up a cached vector for `text`, returning `None` on a cache miss.
     pub fn get(&mut self, text: &str) -> Option<Vec<f32>> {
-        if let Some(v) = self.map.get(text) {
-            // Move to the back of the LRU order.
-            self.order.retain(|k| k != text);
-            self.order.push_back(text.to_string());
-            Some(v.clone())
+        let key = Self::key(text);
+        if let Some(vector) = self.inner.get(&key) {
+            self.hit_count += 1;
+            Some(vector.clone())
         } else {
+            self.miss_count += 1;
             None
         }
     }
 
-    /// Insert or update a cached vector for `text`, evicting the LRU entry if necessary.
-    pub fn insert(&mut self, text: String, vector: Vec<f32>) {
-        if self.map.contains_key(&text) {
-            self.order.retain(|k| k != &text);
-        } else if self.map.len() >= self.capacity {
-            if let Some(evict) = self.order.pop_front() {
-                self.map.remove(&evict);
-            }
+    /// Insert or update a cached vector for `text`.
+    pub fn insert(&mut self, text: &str, vector: Vec<f32>) {
+        let key = Self::key(text);
+        self.inner.put(key, vector);
+    }
+
+    /// Return a snapshot of cache hit/miss counts and entry count.
+    pub fn stats(&self) -> EmbeddingCacheStats {
+        EmbeddingCacheStats {
+            hit_count: self.hit_count,
+            miss_count: self.miss_count,
+            len: self.inner.len(),
         }
-        self.order.push_back(text.clone());
-        self.map.insert(text, vector);
-    }
-
-    /// Return the current number of cached entries.
-    pub fn len(&self) -> usize {
-        self.map.len()
-    }
-
-    /// Return `true` if the cache is empty.
-    pub fn is_empty(&self) -> bool {
-        self.map.is_empty()
     }
 }

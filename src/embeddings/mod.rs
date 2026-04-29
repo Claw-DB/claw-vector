@@ -6,6 +6,6 @@ pub mod client;
 /// Domain types for embedding requests and responses.
 pub mod types;
 
-pub use cache::EmbeddingCache;
-pub use client::EmbeddingClient;
-pub use types::{EmbeddingRequest, EmbeddingResponse, EmbedVector};
+pub use cache::{EmbeddingCache, EmbeddingCacheStats};
+pub use client::{EmbeddingClient, EmbeddingProvider};
+pub use types::{EmbedVector, EmbeddingRequest, EmbeddingResponse, ModelInfo};

@@ -18,12 +18,20 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
     let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if na == 0.0 || nb == 0.0 { 1.0 } else { 1.0 - dot / (na * nb) }
+    if na == 0.0 || nb == 0.0 {
+        1.0
+    } else {
+        1.0 - dot / (na * nb)
+    }
 }
 
 /// Euclidean (L2) distance.
 pub fn euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
-    a.iter().zip(b.iter()).map(|(x, y)| (x - y) * (x - y)).sum::<f32>().sqrt()
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| (x - y) * (x - y))
+        .sum::<f32>()
+        .sqrt()
 }
 
 /// Negative dot product ("distance" — lower = more similar).
@@ -45,16 +53,26 @@ pub struct FlatIndex {
 impl FlatIndex {
     /// Create a new, empty flat index.
     pub fn new(dimensions: usize, distance: DistanceMetric) -> Self {
-        FlatIndex { vectors: RwLock::new(Vec::new()), dimensions, distance }
+        FlatIndex {
+            vectors: RwLock::new(Vec::new()),
+            dimensions,
+            distance,
+        }
     }
 
     /// Insert a single vector, validating its dimensionality.
     #[instrument(skip(self, vector))]
     pub fn insert(&self, id: usize, vector: Vec<f32>) -> VectorResult<()> {
         if vector.len() != self.dimensions {
-            return Err(VectorError::DimensionMismatch { expected: self.dimensions, got: vector.len() });
+            return Err(VectorError::DimensionMismatch {
+                expected: self.dimensions,
+                got: vector.len(),
+            });
         }
-        self.vectors.write().map_err(|e| VectorError::Index(e.to_string()))?.push((id, vector));
+        self.vectors
+            .write()
+            .map_err(|e| VectorError::Index(e.to_string()))?
+            .push((id, vector));
         Ok(())
     }
 
@@ -63,10 +81,16 @@ impl FlatIndex {
     pub fn insert_batch(&self, items: Vec<(usize, Vec<f32>)>) -> VectorResult<()> {
         for (_, v) in &items {
             if v.len() != self.dimensions {
-                return Err(VectorError::DimensionMismatch { expected: self.dimensions, got: v.len() });
+                return Err(VectorError::DimensionMismatch {
+                    expected: self.dimensions,
+                    got: v.len(),
+                });
             }
         }
-        self.vectors.write().map_err(|e| VectorError::Index(e.to_string()))?.extend(items);
+        self.vectors
+            .write()
+            .map_err(|e| VectorError::Index(e.to_string()))?
+            .extend(items);
         Ok(())
     }
 
@@ -74,18 +98,27 @@ impl FlatIndex {
     #[instrument(skip(self, query))]
     pub fn search(&self, query: &[f32], top_k: usize) -> VectorResult<Vec<(usize, f32)>> {
         if query.len() != self.dimensions {
-            return Err(VectorError::DimensionMismatch { expected: self.dimensions, got: query.len() });
+            return Err(VectorError::DimensionMismatch {
+                expected: self.dimensions,
+                got: query.len(),
+            });
         }
-        let vecs = self.vectors.read().map_err(|e| VectorError::Index(e.to_string()))?;
+        let vecs = self
+            .vectors
+            .read()
+            .map_err(|e| VectorError::Index(e.to_string()))?;
         let dist = self.distance;
-        let mut scores: Vec<(usize, f32)> = vecs.par_iter().map(|(id, v)| {
-            let d = match dist {
-                DistanceMetric::Cosine => cosine_similarity(query, v),
-                DistanceMetric::Euclidean => euclidean_distance(query, v),
-                DistanceMetric::DotProduct => dot_product(query, v),
-            };
-            (*id, d)
-        }).collect();
+        let mut scores: Vec<(usize, f32)> = vecs
+            .par_iter()
+            .map(|(id, v)| {
+                let d = match dist {
+                    DistanceMetric::Cosine => cosine_similarity(query, v),
+                    DistanceMetric::Euclidean => euclidean_distance(query, v),
+                    DistanceMetric::DotProduct => dot_product(query, v),
+                };
+                (*id, d)
+            })
+            .collect();
         scores.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
         scores.truncate(top_k);
         Ok(scores)
@@ -94,7 +127,10 @@ impl FlatIndex {
     /// Remove a vector by id. Returns `true` if the id was present.
     #[instrument(skip(self))]
     pub fn delete(&self, id: usize) -> VectorResult<bool> {
-        let mut vecs = self.vectors.write().map_err(|e| VectorError::Index(e.to_string()))?;
+        let mut vecs = self
+            .vectors
+            .write()
+            .map_err(|e| VectorError::Index(e.to_string()))?;
         let before = vecs.len();
         vecs.retain(|(vid, _)| *vid != id);
         Ok(vecs.len() < before)
@@ -112,7 +148,11 @@ impl FlatIndex {
 
     /// Return all stored (id, vector) pairs (used for persistence and migration).
     pub fn all_vectors(&self) -> VectorResult<Vec<(usize, Vec<f32>)>> {
-        Ok(self.vectors.read().map_err(|e| VectorError::Index(e.to_string()))?.clone())
+        Ok(self
+            .vectors
+            .read()
+            .map_err(|e| VectorError::Index(e.to_string()))?
+            .clone())
     }
 
     /// Migrate all vectors into a fresh [`HnswIndex`].

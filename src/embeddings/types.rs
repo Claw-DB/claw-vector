@@ -31,3 +31,16 @@ pub struct EmbeddingResponse {
     /// End-to-end latency of the embedding call in milliseconds.
     pub latency_ms: i64,
 }
+
+/// Metadata describing the currently loaded embedding model.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelInfo {
+    /// Name of the model running in the embedding service.
+    pub model_name: String,
+    /// Number of output dimensions produced by the model.
+    pub dimensions: usize,
+    /// Maximum supported sequence length.
+    pub max_sequence_length: usize,
+    /// Runtime device, such as `cpu` or `cuda`.
+    pub device: String,
+}

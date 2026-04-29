@@ -10,7 +10,7 @@ pub enum VectorError {
 
     /// SQLite persistence failure.
     #[error("store error: {0}")]
-    Store(#[from] sqlx::Error),
+    Store(Box<sqlx::Error>),
 
     /// Embedding generation failure.
     #[error("embedding error: {0}")]
@@ -18,7 +18,7 @@ pub enum VectorError {
 
     /// gRPC transport failure.
     #[error("gRPC error: {0}")]
-    Grpc(#[from] tonic::Status),
+    Grpc(Box<tonic::Status>),
 
     /// A collection-level error (not found, already exists, etc.).
     #[error("collection '{name}': {reason}")]
@@ -40,11 +40,11 @@ pub enum VectorError {
 
     /// JSON serialisation/deserialisation failure.
     #[error("serialization error: {0}")]
-    Serialization(#[from] serde_json::Error),
+    Serialization(Box<serde_json::Error>),
 
     /// I/O error (file system operations).
     #[error("io error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(Box<std::io::Error>),
 
     /// Invalid configuration.
     #[error("config error: {0}")]
@@ -85,6 +85,30 @@ impl VectorError {
     }
 }
 
+impl From<sqlx::Error> for VectorError {
+    fn from(value: sqlx::Error) -> Self {
+        VectorError::Store(Box::new(value))
+    }
+}
+
+impl From<tonic::Status> for VectorError {
+    fn from(value: tonic::Status) -> Self {
+        VectorError::Grpc(Box::new(value))
+    }
+}
+
+impl From<serde_json::Error> for VectorError {
+    fn from(value: serde_json::Error) -> Self {
+        VectorError::Serialization(Box::new(value))
+    }
+}
+
+impl From<std::io::Error> for VectorError {
+    fn from(value: std::io::Error) -> Self {
+        VectorError::Io(Box::new(value))
+    }
+}
+
 impl From<VectorError> for tonic::Status {
     fn from(e: VectorError) -> tonic::Status {
         match &e {
@@ -102,7 +126,7 @@ impl From<VectorError> for tonic::Status {
             VectorError::Index(msg) => tonic::Status::internal(msg.clone()),
             VectorError::SearchError(msg) => tonic::Status::internal(msg.clone()),
             VectorError::FilterError(msg) => tonic::Status::internal(msg.clone()),
-            VectorError::Grpc(status) => status.clone(),
+            VectorError::Grpc(status) => status.as_ref().clone(),
             _ => tonic::Status::internal(e.to_string()),
         }
     }

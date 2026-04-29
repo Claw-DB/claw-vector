@@ -40,9 +40,7 @@ impl DistanceMetric {
                 .map(|(x, y)| (x - y) * (x - y))
                 .sum::<f32>()
                 .sqrt(),
-            DistanceMetric::DotProduct => {
-                -a.iter().zip(b.iter()).map(|(x, y)| x * y).sum::<f32>()
-            }
+            DistanceMetric::DotProduct => -a.iter().zip(b.iter()).map(|(x, y)| x * y).sum::<f32>(),
         }
     }
 }
@@ -98,7 +96,7 @@ impl VectorRecord {
             id: Uuid::new_v4(),
             collection: collection.into(),
             vector,
-            metadata: serde_json::Value::Null,
+            metadata: serde_json::json!({}),
             text: None,
             created_at: Utc::now(),
         }
@@ -154,7 +152,7 @@ pub struct Collection {
 pub struct SearchResult {
     /// Record identifier.
     pub id: Uuid,
-    /// Distance or similarity score (lower = closer for distance metrics).
+    /// Normalized similarity score in the range `[0.0, 1.0]` (higher is better).
     pub score: f32,
     /// The raw vector (only set when the query requests it).
     pub vector: Option<Vec<f32>>,
@@ -162,6 +160,30 @@ pub struct SearchResult {
     pub metadata: serde_json::Value,
     /// Original text (if stored with the record).
     pub text: Option<String>,
+    /// UTC timestamp when the source record was created.
+    pub created_at: DateTime<Utc>,
+}
+
+/// Additional metrics captured for a search operation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct SearchMetrics {
+    /// Dimensionality of the input query vector.
+    pub query_vector_dims: usize,
+    /// Number of raw ANN or hybrid candidates examined before post-processing.
+    pub candidates_evaluated: usize,
+    /// Number of candidates that survived post-filtering and reranking.
+    pub post_filter_count: usize,
+    /// End-to-end latency for the search in microseconds.
+    pub latency_us: u64,
+}
+
+/// Full search response, including user-visible results and execution metrics.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct SearchResponse {
+    /// Ordered nearest-neighbour results.
+    pub results: Vec<SearchResult>,
+    /// Metrics captured while serving the request.
+    pub metrics: SearchMetrics,
 }
 
 // ─── MetadataFilter ──────────────────────────────────────────────────────────
@@ -177,6 +199,39 @@ pub enum MetadataFilter {
         /// Expected value.
         value: serde_json::Value,
     },
+    /// Numeric greater-than check.
+    Gt {
+        /// Dot-notation JSON path to compare.
+        key: String,
+        /// Threshold value.
+        value: f64,
+    },
+    /// Numeric less-than check.
+    Lt {
+        /// Dot-notation JSON path to compare.
+        key: String,
+        /// Threshold value.
+        value: f64,
+    },
+    /// Case-insensitive substring match for string values.
+    Contains {
+        /// Dot-notation JSON path to compare.
+        key: String,
+        /// Substring to search for.
+        value: String,
+    },
+    /// Membership check for scalar JSON values.
+    In {
+        /// Dot-notation JSON path to compare.
+        key: String,
+        /// Candidate values.
+        values: Vec<serde_json::Value>,
+    },
+    /// Presence check for a key or nested path.
+    Exists {
+        /// Dot-notation JSON path whose presence is required.
+        key: String,
+    },
     /// Logical AND of multiple sub-filters.
     And(Vec<MetadataFilter>),
     /// Logical OR of multiple sub-filters.
@@ -188,13 +243,30 @@ pub enum MetadataFilter {
 impl MetadataFilter {
     /// Evaluate this filter against a JSON metadata object.
     pub fn matches(&self, metadata: &serde_json::Value) -> bool {
-        match self {
-            MetadataFilter::Eq { key, value } => metadata.get(key) == Some(value),
-            MetadataFilter::And(filters) => filters.iter().all(|f| f.matches(metadata)),
-            MetadataFilter::Or(filters) => filters.iter().any(|f| f.matches(metadata)),
-            MetadataFilter::Not(filter) => !filter.matches(metadata),
-        }
+        crate::search::filters::apply_filter(self, metadata)
     }
+}
+
+/// Post-retrieval reranking configuration.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RerankerConfig {
+    /// Disable reranking.
+    None,
+    /// Promote diversity using maximal marginal relevance.
+    Diversity {
+        /// Relevance-vs-diversity balance in the range `[0.0, 1.0]`.
+        lambda: f32,
+    },
+    /// Boost recently created records.
+    Recency {
+        /// Weight applied to the recency boost.
+        weight: f32,
+        /// Exponential half-life in days.
+        half_life_days: f32,
+    },
+    /// Apply multiple rerankers in sequence.
+    Composite(Vec<RerankerConfig>),
 }
 
 // ─── SearchQuery ─────────────────────────────────────────────────────────────
@@ -216,6 +288,8 @@ pub struct SearchQuery {
     pub include_metadata: bool,
     /// Override the HNSW `ef_search` parameter for this query.
     pub ef_search: Option<usize>,
+    /// Optional post-retrieval reranking strategy.
+    pub reranker: Option<RerankerConfig>,
 }
 
 impl SearchQuery {
@@ -234,6 +308,84 @@ impl SearchQuery {
         if self.top_k == 0 {
             return Err(VectorError::SearchError("top_k must be > 0".into()));
         }
+        if let Some(filter) = &self.filter {
+            crate::search::filters::validate_filter(filter)?;
+        }
         Ok(())
     }
+}
+
+/// Hybrid vector + keyword search query.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HybridQuery {
+    /// Target collection name.
+    pub collection: String,
+    /// Query vector used for ANN retrieval.
+    pub vector: Vec<f32>,
+    /// Optional keyword query used for FTS5 retrieval.
+    pub text: Option<String>,
+    /// Maximum number of results to return.
+    pub top_k: usize,
+    /// Blend factor where `1.0` is vector-only and `0.0` is keyword-only.
+    pub alpha: f32,
+    /// Optional metadata filter applied after fusion.
+    pub filter: Option<MetadataFilter>,
+    /// If `true`, each `SearchResult` will include the raw vector.
+    pub include_vectors: bool,
+    /// Optional post-retrieval reranking strategy.
+    pub reranker: Option<RerankerConfig>,
+}
+
+impl HybridQuery {
+    /// Validate the query fields, returning an error for invalid configurations.
+    pub fn validate(&self) -> VectorResult<()> {
+        if self.collection.is_empty() {
+            return Err(VectorError::SearchError(
+                "collection name must not be empty".into(),
+            ));
+        }
+        if self.vector.is_empty() {
+            return Err(VectorError::SearchError(
+                "query vector must not be empty".into(),
+            ));
+        }
+        if self.top_k == 0 {
+            return Err(VectorError::SearchError("top_k must be > 0".into()));
+        }
+        if !(0.0..=1.0).contains(&self.alpha) {
+            return Err(VectorError::SearchError(
+                "hybrid alpha must be between 0.0 and 1.0".into(),
+            ));
+        }
+        if let Some(filter) = &self.filter {
+            crate::search::filters::validate_filter(filter)?;
+        }
+        Ok(())
+    }
+}
+
+/// Persisted storage statistics for a collection.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct CollectionStats {
+    /// Number of vectors stored in the collection.
+    pub vector_count: u64,
+    /// Estimated on-disk size of the collection in bytes.
+    pub size_bytes: u64,
+}
+
+/// Top-level runtime statistics for the vector engine.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct EngineStats {
+    /// Number of known collections.
+    pub collection_count: usize,
+    /// Total vectors stored across all collections.
+    pub total_vectors: u64,
+    /// Number of indexes currently loaded in memory.
+    pub loaded_indexes: usize,
+    /// Number of mmap vector files currently opened.
+    pub loaded_mmap_files: usize,
+    /// Embedding cache hit counter.
+    pub embedding_cache_hits: u64,
+    /// Embedding cache miss counter.
+    pub embedding_cache_misses: u64,
 }

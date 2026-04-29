@@ -1,135 +1,229 @@
-// engine.rs — VectorEngine struct: top-level lifecycle coordinator that ties together
-// the index selector, SQLite store, and embedding client.
-use std::{
-    collections::HashMap,
-    sync::{Arc, RwLock},
-};
+// engine.rs — VectorEngine: public entry point that unifies all subsystems.
+use std::sync::Arc;
 
-use chrono::Utc;
 use tracing::instrument;
 
 use crate::{
+    collections::CollectionManager,
     config::VectorConfig,
-    error::{VectorError, VectorResult},
-    index::selector::IndexSelector,
-    store::sqlite::SqliteStore,
-    types::{Collection, DistanceMetric, IndexType, SearchQuery, SearchResult, VectorRecord},
+    embeddings::{EmbeddingClient, EmbeddingProvider},
+    error::VectorResult,
+    search::{AnnSearcher, HybridSearcher},
+    store::VectorStore,
+    types::{
+        Collection, DistanceMetric, EngineStats, HybridQuery, SearchQuery, SearchResponse,
+        VectorRecord,
+    },
 };
 
-/// Shared state for a single collection.
-struct CollectionState {
-    index: IndexSelector,
-    record_map: HashMap<usize, SearchResult>,
-    next_id: usize,
-}
-
-/// High-level engine that manages collections, indices, and persistence.
+/// High-level engine that manages collections, search, and embeddings.
 pub struct VectorEngine {
-    config: VectorConfig,
-    store: Arc<SqliteStore>,
-    collections: RwLock<HashMap<String, RwLock<CollectionState>>>,
+    /// Runtime configuration.
+    pub config: VectorConfig,
+    /// Collection lifecycle and persistence manager.
+    pub collections: Arc<CollectionManager>,
+    /// ANN search service.
+    pub ann_searcher: Arc<AnnSearcher>,
+    /// Hybrid vector + keyword search service.
+    pub hybrid_searcher: Arc<HybridSearcher>,
+    /// Embedding provider used for text ingestion and search.
+    pub embedding_client: Arc<dyn EmbeddingProvider>,
 }
 
 impl VectorEngine {
-    /// Create a new engine, opening (or creating) the SQLite database.
+    /// Create a new engine using the configured gRPC embedding service.
+    #[instrument]
     pub async fn new(config: VectorConfig) -> VectorResult<Self> {
-        let store = SqliteStore::open(&config.db_path).await?;
+        let embedding_client =
+            Arc::new(EmbeddingClient::new(&config).await?) as Arc<dyn EmbeddingProvider>;
+        Self::with_embedding_provider(config, embedding_client).await
+    }
+
+    /// Open an engine using the default configuration.
+    #[instrument]
+    pub async fn open_default() -> VectorResult<Self> {
+        Self::new(VectorConfig::default()).await
+    }
+
+    /// Create a new engine with a caller-supplied embedding provider.
+    #[instrument(skip(embedding_client))]
+    pub async fn with_embedding_provider(
+        config: VectorConfig,
+        embedding_client: Arc<dyn EmbeddingProvider>,
+    ) -> VectorResult<Self> {
+        let store = Arc::new(VectorStore::new(&config.db_path).await?);
+        let collections =
+            Arc::new(CollectionManager::new(config.clone(), Arc::clone(&store)).await?);
+        let ann_searcher = Arc::new(AnnSearcher::new(Arc::clone(&collections)));
+        let hybrid_searcher = Arc::new(HybridSearcher::new(
+            Arc::clone(&ann_searcher),
+            Arc::clone(&store),
+        ));
+
         Ok(VectorEngine {
             config,
-            store: Arc::new(store),
-            collections: RwLock::new(HashMap::new()),
+            collections,
+            ann_searcher,
+            hybrid_searcher,
+            embedding_client,
         })
     }
 
-    /// Return a reference to the underlying store (for administrative operations).
-    pub fn store(&self) -> &SqliteStore {
-        &self.store
-    }
-
-    /// Create a new collection with the given parameters.
-    #[instrument(skip_all)]
+    /// Create a collection with the provided dimensions and distance metric.
+    #[instrument(skip(self))]
     pub async fn create_collection(
         &self,
-        name: impl Into<String>,
+        name: &str,
         dimensions: usize,
         distance: DistanceMetric,
     ) -> VectorResult<Collection> {
-        let name = name.into();
-        {
-            let cols = self.collections.read().map_err(|e| VectorError::Index(e.to_string()))?;
-            if cols.contains_key(&name) {
-                return Err(VectorError::Collection {
-                    name: name.clone(),
-                    reason: "already exists".into(),
-                });
-            }
-        }
-        let col = Collection {
-            name: name.clone(),
-            dimensions,
-            distance,
-            index_type: IndexType::Flat,
-            created_at: Utc::now(),
-            vector_count: 0,
-            metadata: serde_json::Value::Null,
-            ef_construction: self.config.ef_construction,
-            m_connections: self.config.m_connections,
-        };
-        self.store.save_collection(&col).await?;
-        let state = CollectionState {
-            index: IndexSelector::new(dimensions, distance, &self.config),
-            record_map: HashMap::new(),
-            next_id: 0,
-        };
         self.collections
-            .write()
-            .map_err(|e| VectorError::Index(e.to_string()))?
-            .insert(name, RwLock::new(state));
-        Ok(col)
+            .create_collection(name, dimensions, distance)
+            .await
     }
 
-    /// Insert a vector record into the named collection.
-    #[instrument(skip_all)]
-    pub async fn insert(&self, record: VectorRecord) -> VectorResult<uuid::Uuid> {
-        let id = record.id;
-
-        // Acquire the write lock, compute internal_id, and update in-memory state.
-        // The lock guards must be dropped before any `.await` point.
-        let internal_id = {
-            let cols = self.collections.read().map_err(|e| VectorError::Index(e.to_string()))?;
-            let state_lock = cols.get(&record.collection).ok_or_else(|| VectorError::Collection {
-                name: record.collection.clone(),
-                reason: "not found".into(),
-            })?;
-            let mut state = state_lock.write().map_err(|e| VectorError::Index(e.to_string()))?;
-            let internal_id = state.next_id;
-            state.next_id += 1;
-            let search_result = SearchResult {
-                id: record.id,
-                score: 0.0,
-                vector: Some(record.vector.clone()),
-                metadata: record.metadata.clone(),
-                text: record.text.clone(),
-            };
-            state.record_map.insert(internal_id, search_result);
-            state.index.insert(internal_id, record.vector.clone(), &self.config)?;
-            internal_id
-        };
-
-        self.store.save_record(&record, internal_id).await?;
-        Ok(id)
+    /// Delete a collection and all of its persisted state.
+    #[instrument(skip(self))]
+    pub async fn delete_collection(&self, name: &str) -> VectorResult<()> {
+        self.collections.delete_collection(name).await
     }
 
-    /// Search the named collection for the nearest neighbours of `query`.
-    #[instrument(skip_all)]
-    pub async fn search(&self, query: SearchQuery) -> VectorResult<Vec<SearchResult>> {
-        let ef = query.ef_search.unwrap_or(self.config.ef_search);
-        let cols = self.collections.read().map_err(|e| VectorError::Index(e.to_string()))?;
-        let state_lock = cols.get(&query.collection).ok_or_else(|| VectorError::Collection {
-            name: query.collection.clone(),
-            reason: "not found".into(),
-        })?;
-        let state = state_lock.read().map_err(|e| VectorError::Index(e.to_string()))?;
-        crate::search::ann::AnnSearch::search(&state.index, &query, ef, &state.record_map)
+    /// List all collections.
+    #[instrument(skip(self))]
+    pub async fn list_collections(&self) -> VectorResult<Vec<Collection>> {
+        self.collections.list_collections().await
+    }
+
+    /// Embed text, persist the record, and return its UUID.
+    #[instrument(skip(self, text, metadata))]
+    pub async fn upsert(
+        &self,
+        collection: &str,
+        text: &str,
+        metadata: serde_json::Value,
+    ) -> VectorResult<uuid::Uuid> {
+        let vector = self.embedding_client.embed_one(text).await?;
+        let record = VectorRecord::new(collection, vector)
+            .with_text(text.to_string())
+            .with_metadata(metadata);
+        self.collections.insert_vector(record).await
+    }
+
+    /// Embed and insert multiple text records.
+    #[instrument(skip(self, items))]
+    pub async fn upsert_batch(
+        &self,
+        collection: &str,
+        items: Vec<(String, serde_json::Value)>,
+    ) -> VectorResult<Vec<uuid::Uuid>> {
+        let texts = items
+            .iter()
+            .map(|(text, _)| text.clone())
+            .collect::<Vec<_>>();
+        let embeddings = self.embedding_client.embed(texts).await?;
+        let records = items
+            .into_iter()
+            .zip(embeddings.into_iter())
+            .map(|((text, metadata), vector)| {
+                VectorRecord::new(collection, vector)
+                    .with_text(text)
+                    .with_metadata(metadata)
+            })
+            .collect::<Vec<_>>();
+        self.collections.insert_batch(records).await
+    }
+
+    /// Insert a raw vector directly.
+    #[instrument(skip(self, vector, metadata))]
+    pub async fn upsert_vector(
+        &self,
+        collection: &str,
+        vector: Vec<f32>,
+        metadata: serde_json::Value,
+    ) -> VectorResult<uuid::Uuid> {
+        let record = VectorRecord::new(collection, vector).with_metadata(metadata);
+        self.collections.insert_vector(record).await
+    }
+
+    /// Execute ANN search.
+    #[instrument(skip(self, query))]
+    pub async fn search(&self, query: SearchQuery) -> VectorResult<SearchResponse> {
+        self.ann_searcher.search(query).await
+    }
+
+    /// Execute ANN search from raw text.
+    #[instrument(skip(self, text))]
+    pub async fn search_text(
+        &self,
+        collection: &str,
+        text: &str,
+        top_k: usize,
+    ) -> VectorResult<SearchResponse> {
+        let vector = self.embedding_client.embed_one(text).await?;
+        self.ann_searcher
+            .search(SearchQuery {
+                collection: collection.to_string(),
+                vector,
+                top_k,
+                filter: None,
+                include_vectors: false,
+                include_metadata: true,
+                ef_search: None,
+                reranker: None,
+            })
+            .await
+    }
+
+    /// Execute hybrid search.
+    #[instrument(skip(self, query))]
+    pub async fn hybrid_search(&self, query: HybridQuery) -> VectorResult<SearchResponse> {
+        self.hybrid_searcher.search(query).await
+    }
+
+    /// Delete a vector record by UUID.
+    #[instrument(skip(self))]
+    pub async fn delete(&self, collection: &str, id: uuid::Uuid) -> VectorResult<bool> {
+        self.collections.delete_vector(collection, id).await
+    }
+
+    /// Fetch a vector record by UUID.
+    #[instrument(skip(self))]
+    pub async fn get(&self, collection: &str, id: uuid::Uuid) -> VectorResult<VectorRecord> {
+        self.collections.get_vector(collection, id).await
+    }
+
+    /// Persist indexes and close the underlying store.
+    #[instrument(skip(self))]
+    pub async fn close(&self) -> VectorResult<()> {
+        self.collections.persist_indexes().await?;
+        self.collections.store.close().await;
+        Ok(())
+    }
+
+    /// Return runtime statistics for the engine.
+    #[instrument(skip(self))]
+    pub async fn stats(&self) -> EngineStats {
+        let collections = self
+            .collections
+            .list_collections()
+            .await
+            .unwrap_or_default();
+        let cache_stats = self
+            .embedding_client
+            .cache_stats()
+            .await
+            .unwrap_or_default();
+
+        EngineStats {
+            collection_count: collections.len(),
+            total_vectors: collections
+                .iter()
+                .map(|collection| collection.vector_count)
+                .sum(),
+            loaded_indexes: self.collections.loaded_index_count().await,
+            loaded_mmap_files: self.collections.loaded_mmap_count().await,
+            embedding_cache_hits: cache_stats.hit_count,
+            embedding_cache_misses: cache_stats.miss_count,
+        }
     }
 }

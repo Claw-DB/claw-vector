@@ -19,7 +19,7 @@ pub enum IndexSelector {
     /// Brute-force index for small collections.
     Flat(FlatIndex),
     /// Approximate NN index for larger collections.
-    Hnsw(HnswIndex),
+    Hnsw(Box<HnswIndex>),
 }
 
 impl IndexSelector {
@@ -30,7 +30,12 @@ impl IndexSelector {
 
     /// Insert a single vector, migrating to HNSW if the threshold is crossed.
     #[instrument(skip(self, vector, config))]
-    pub fn insert(&mut self, id: usize, vector: Vec<f32>, config: &VectorConfig) -> VectorResult<()> {
+    pub fn insert(
+        &mut self,
+        id: usize,
+        vector: Vec<f32>,
+        config: &VectorConfig,
+    ) -> VectorResult<()> {
         match self {
             IndexSelector::Flat(flat) => {
                 flat.insert(id, vector)?;
@@ -45,7 +50,11 @@ impl IndexSelector {
 
     /// Insert a batch of vectors, migrating to HNSW if the threshold is crossed.
     #[instrument(skip(self, items, config))]
-    pub fn insert_batch(&mut self, items: Vec<(usize, Vec<f32>)>, config: &VectorConfig) -> VectorResult<()> {
+    pub fn insert_batch(
+        &mut self,
+        items: Vec<(usize, Vec<f32>)>,
+        config: &VectorConfig,
+    ) -> VectorResult<()> {
         match self {
             IndexSelector::Flat(flat) => {
                 flat.insert_batch(items)?;
@@ -60,7 +69,12 @@ impl IndexSelector {
 
     /// Search for `top_k` nearest neighbours of `query`.
     #[instrument(skip(self, query))]
-    pub fn search(&self, query: &[f32], top_k: usize, ef_search: usize) -> VectorResult<Vec<(usize, f32)>> {
+    pub fn search(
+        &self,
+        query: &[f32],
+        top_k: usize,
+        ef_search: usize,
+    ) -> VectorResult<Vec<(usize, f32)>> {
         match self {
             IndexSelector::Flat(flat) => flat.search(query, top_k),
             IndexSelector::Hnsw(hnsw) => hnsw.search(query, top_k, ef_search),
@@ -72,13 +86,24 @@ impl IndexSelector {
     pub fn delete(&mut self, id: usize) -> VectorResult<bool> {
         match self {
             IndexSelector::Flat(flat) => flat.delete(id),
-            IndexSelector::Hnsw(hnsw) => { hnsw.delete(id)?; Ok(true) }
+            IndexSelector::Hnsw(hnsw) => {
+                hnsw.delete(id)?;
+                Ok(true)
+            }
         }
     }
 
     /// Return the number of live elements.
     pub fn len(&self) -> usize {
-        match self { IndexSelector::Flat(f) => f.len(), IndexSelector::Hnsw(h) => h.len() }
+        match self {
+            IndexSelector::Flat(f) => f.len(),
+            IndexSelector::Hnsw(h) => h.len(),
+        }
+    }
+
+    /// Return `true` if the selector contains no live elements.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     /// Return `true` if the selector is backed by HNSW.
@@ -96,7 +121,7 @@ impl IndexSelector {
             }
             IndexSelector::Hnsw(_) => return Ok(()),
         };
-        *self = IndexSelector::Hnsw(hnsw);
+        *self = IndexSelector::Hnsw(Box::new(hnsw));
         Ok(())
     }
 
@@ -106,10 +131,16 @@ impl IndexSelector {
         let col_dir = dir.join(collection);
         std::fs::create_dir_all(&col_dir)?;
         let kind = if self.is_hnsw() { "hnsw" } else { "flat" };
-        std::fs::write(col_dir.join("index.meta.json"), serde_json::to_string(&serde_json::json!({ "index_type": kind }))?)?;
+        std::fs::write(
+            col_dir.join("index.meta.json"),
+            serde_json::to_string(&serde_json::json!({ "index_type": kind }))?,
+        )?;
         match self {
             IndexSelector::Flat(flat) => {
-                std::fs::write(col_dir.join("flat.json"), serde_json::to_string(&flat.all_vectors()?)?)?;
+                std::fs::write(
+                    col_dir.join("flat.json"),
+                    serde_json::to_string(&flat.all_vectors()?)?,
+                )?;
             }
             IndexSelector::Hnsw(hnsw) => hnsw.save(&col_dir)?,
         }
@@ -118,17 +149,30 @@ impl IndexSelector {
 
     /// Reload a previously saved index from `<dir>/<collection>/`.
     #[instrument(skip(config))]
-    pub fn load(dir: &Path, collection: &str, config: &VectorConfig, distance: DistanceMetric, dimensions: usize) -> VectorResult<Self> {
+    pub fn load(
+        dir: &Path,
+        collection: &str,
+        config: &VectorConfig,
+        distance: DistanceMetric,
+        dimensions: usize,
+    ) -> VectorResult<Self> {
         let col_dir = dir.join(collection);
-        let meta: serde_json::Value = serde_json::from_reader(std::fs::File::open(col_dir.join("index.meta.json"))?)?;
-        match meta["index_type"].as_str().ok_or_else(|| VectorError::Index("missing index_type".into()))? {
+        let meta: serde_json::Value =
+            serde_json::from_reader(std::fs::File::open(col_dir.join("index.meta.json"))?)?;
+        match meta["index_type"]
+            .as_str()
+            .ok_or_else(|| VectorError::Index("missing index_type".into()))?
+        {
             "flat" => {
-                let vecs: Vec<(usize, Vec<f32>)> = serde_json::from_str(&std::fs::read_to_string(col_dir.join("flat.json"))?)?;
+                let vecs: Vec<(usize, Vec<f32>)> =
+                    serde_json::from_str(&std::fs::read_to_string(col_dir.join("flat.json"))?)?;
                 let flat = FlatIndex::new(dimensions, distance);
                 flat.insert_batch(vecs)?;
                 Ok(IndexSelector::Flat(flat))
             }
-            "hnsw" => Ok(IndexSelector::Hnsw(HnswIndex::load(&col_dir, config, distance)?)),
+            "hnsw" => Ok(IndexSelector::Hnsw(Box::new(HnswIndex::load(
+                &col_dir, config, distance,
+            )?))),
             other => Err(VectorError::Index(format!("unknown index_type '{other}'"))),
         }
     }

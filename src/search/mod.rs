@@ -8,6 +8,10 @@ pub mod hybrid;
 /// Score fusion and reranking strategies.
 pub mod rerank;
 
-pub use ann::AnnSearch;
-pub use filters::MetadataFilterExt;
-pub use rerank::RerankStrategy;
+pub use ann::AnnSearcher;
+pub use filters::{apply_filter, parse_json_path, validate_filter, MetadataFilterExt};
+pub use hybrid::HybridSearcher;
+pub use rerank::{
+    apply_reranker_config, mmr_select, reranker_needs_vectors, CompositeReranker,
+    CrossEncoderReranker, DiversityReranker, RecencyReranker, Reranker,
+};
