@@ -19,6 +19,7 @@ dependencies = [
     "protobuf>=5.27",
     "pydantic>=2.7",
     "pydantic-settings>=2.2",
+    "transformers>=4.41",
     "structlog>=24.2",
     "prometheus-client>=0.20",
 ]
@@ -34,7 +35,10 @@ dev = [
 claw-vector-svc = "claw_vector_svc.main:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["python/claw_vector_svc"]
+packages = ["python/claw_vector_svc", "python/proto"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"python/proto/vector.proto" = "proto/vector.proto"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

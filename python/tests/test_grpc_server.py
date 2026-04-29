@@ -1,24 +1,24 @@
-# test_grpc_server.py — unit tests for the gRPC servicer.
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import numpy as np
 import pytest
 
 from claw_vector_svc.config import Settings
 from claw_vector_svc.embedder import EmbedderService
-from claw_vector_svc.grpc_server import EmbeddingServicer
+from claw_vector_svc.grpc_server import EmbeddingServicer, vector_pb2
 
 
 @pytest.fixture()
 def mock_embedder() -> EmbedderService:
-    settings = Settings(CLAW_MODEL_NAME="test-model", CLAW_DEVICE="cpu")
-    embedder = EmbedderService(settings)
-    embedder._model = MagicMock()
-    embedder._model.get_sentence_embedding_dimension.return_value = 8
-    embedder._model.max_seq_length = 64
-    embedder._model.encode.return_value = [[0.1] * 8, [0.2] * 8]
-    return embedder
+    settings = Settings(MODEL_NAME="test-model", DEVICE="cpu")
+    mock_model = MagicMock()
+    mock_model.get_sentence_embedding_dimension.return_value = 8
+    mock_model.max_seq_length = 64
+    mock_model.encode.return_value = np.asarray([[0.1] * 8, [0.2] * 8], dtype="float32")
+    with patch("claw_vector_svc.embedder.SentenceTransformer", return_value=mock_model):
+        return EmbedderService(settings)
 
 
 @pytest.fixture()
@@ -26,42 +26,23 @@ def servicer(mock_embedder: EmbedderService) -> EmbeddingServicer:
     return EmbeddingServicer(mock_embedder)
 
 
-def _patched_import():
-    mock_pb2 = MagicMock()
-    mock_pb2.HealthResponse.return_value = MagicMock(ready=True)
-    mock_pb2.ModelInfoResponse.return_value = MagicMock()
-    return mock_pb2, MagicMock()
+@pytest.mark.asyncio
+async def test_health_returns_ready(servicer: EmbeddingServicer) -> None:
+    response = await servicer.Health(MagicMock(), AsyncMock())
+    assert response.ready is True
+    assert response.model_name == "test-model"
 
 
-def test_health_returns_ready(servicer: EmbeddingServicer) -> None:
-    req = MagicMock()
-    ctx = MagicMock()
-    import claw_vector_svc.grpc_server as grpc_mod
-
-    original = grpc_mod._import_proto
-    grpc_mod._import_proto = _patched_import
-    try:
-        servicer.Health(req, ctx)
-        # No exception = success
-    finally:
-        grpc_mod._import_proto = original
+@pytest.mark.asyncio
+async def test_model_info(servicer: EmbeddingServicer) -> None:
+    response = await servicer.ModelInfo(MagicMock(), AsyncMock())
+    assert response.model_name == "test-model"
+    assert response.dimensions == 8
 
 
-def test_model_info(servicer: EmbeddingServicer) -> None:
-    req = MagicMock()
-    ctx = MagicMock()
-    mock_pb2 = MagicMock()
-    import claw_vector_svc.grpc_server as grpc_mod
-
-    original = grpc_mod._import_proto
-
-    def fake_import():
-        return mock_pb2, MagicMock()
-
-    grpc_mod._import_proto = fake_import
-    try:
-        servicer.ModelInfo(req, ctx)
-        call_kwargs = mock_pb2.ModelInfoResponse.call_args.kwargs
-        assert call_kwargs["model_name"] == "test-model"
-    finally:
-        grpc_mod._import_proto = original
+@pytest.mark.asyncio
+async def test_embed_returns_vectors(servicer: EmbeddingServicer) -> None:
+    request = vector_pb2.EmbedRequest(texts=["hello", "world"], normalize=True)
+    response = await servicer.Embed(request, AsyncMock())
+    assert len(response.vectors) == 2
+    assert response.model_name == "test-model"

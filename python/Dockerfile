@@ -1,34 +1,49 @@
-FROM python:3.11-slim
+FROM python:3.11-slim AS builder
 
-LABEL org.opencontainers.image.title="claw-vector-svc" \
-      org.opencontainers.image.description="Embedding microservice for ClawDB" \
-      org.opencontainers.image.source="https://github.com/Claw-DB/claw-vector"
+WORKDIR /build
 
-# System dependencies required by sentence-transformers / onnxruntime.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    curl \
     libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
+COPY pyproject.toml ./
+COPY proto ./proto
+COPY claw_vector_svc ./claw_vector_svc
+
+RUN pip install --upgrade pip \
+    && pip install --no-cache-dir "torch>=2.0" --index-url https://download.pytorch.org/whl/cpu \
+    && pip install --no-cache-dir --prefix=/install '.[inference]'
+
+ARG MODEL_NAME="sentence-transformers/all-MiniLM-L6-v2"
+RUN PYTHONPATH=/install/lib/python3.11/site-packages python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('${MODEL_NAME}')"
+
+FROM python:3.11-slim AS runtime
+
 WORKDIR /app
 
-# Copy dependency manifest first for better Docker layer caching.
-COPY pyproject.toml ./
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --uid 1001 --home-dir /root --no-create-home app \
+    && mkdir -p /root/.cache/huggingface /app \
+    && chmod 755 /root \
+    && chown -R 1001:1001 /root/.cache/huggingface /app
 
-# Install CPU-only torch then remaining dependencies.
-RUN pip install --no-cache-dir "torch>=2.0" --index-url https://download.pytorch.org/whl/cpu \
-    && pip install --no-cache-dir .
-
-# Copy application source.
-COPY python/ ./
-
-# Pre-download the default model so the container starts immediately.
-ARG MODEL_NAME="sentence-transformers/all-MiniLM-L6-v2"
-RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('${MODEL_NAME}')"
-
-# Ports: 8000 = FastAPI REST, 50051 = gRPC, 9090 = Prometheus metrics.
-EXPOSE 8000 50051 9090
+COPY --from=builder /install /usr/local
+COPY claw_vector_svc ./claw_vector_svc
+COPY proto ./proto
 
 ENV PYTHONUNBUFFERED=1
+ENV HTTP_PORT=8080
+ENV GRPC_PORT=50051
 
-CMD ["python", "-m", "claw_vector_svc.main"]
+USER 1001
+
+EXPOSE 50051 8080
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 CMD curl -fsS http://localhost:8080/health || exit 1
+
+CMD ["uvicorn", "claw_vector_svc.main:app", "--host", "0.0.0.0", "--port", "8080"]

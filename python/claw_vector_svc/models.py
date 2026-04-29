@@ -1,4 +1,3 @@
-# models.py — Pydantic request/response schemas for the REST health API.
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
@@ -8,7 +7,6 @@ class EmbedRequest(BaseModel):
     """REST embedding request payload."""
 
     texts: list[str] = Field(..., description="Texts to embed.")
-    model_name: str = Field("", description="Override model name (empty = use default).")
     normalize: bool = Field(True, description="L2-normalise output vectors.")
 
 
@@ -33,6 +31,12 @@ class HealthResponse(BaseModel):
     ready: bool
     model_name: str
     model_load_time_ms: int
+
+
+class ReadyResponse(BaseModel):
+    """Readiness response."""
+
+    ready: bool
 
 
 class ModelInfoResponse(BaseModel):
