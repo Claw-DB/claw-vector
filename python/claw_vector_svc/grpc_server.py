@@ -4,7 +4,7 @@ import asyncio
 import sys
 import time
 from pathlib import Path
-from typing import AsyncIterator
+from typing import AsyncIterator, Callable
 
 import grpc
 from grpc_tools import protoc
@@ -60,11 +60,33 @@ vector_pb2, vector_pb2_grpc = _import_proto()
 class EmbeddingServicer(vector_pb2_grpc.EmbeddingServiceServicer):
     """gRPC servicer that wraps an EmbedderService."""
 
-    def __init__(self, embedder: EmbedderService) -> None:
+    def __init__(
+        self,
+        embedder: EmbedderService,
+        allowed_keys: set[str],
+        is_warmup_complete: Callable[[], bool],
+    ) -> None:
         self._embedder = embedder
+        self._allowed_keys = allowed_keys
+        self._is_warmup_complete = is_warmup_complete
+
+    async def _authorize(self, context) -> None:
+        if not self._allowed_keys:
+            return
+        metadata = dict(context.invocation_metadata())
+        raw = metadata.get("authorization", "")
+        api_key = raw.removeprefix("Bearer ").strip()
+        if api_key not in self._allowed_keys:
+            await context.abort(grpc.StatusCode.UNAUTHENTICATED, "invalid API key")
+
+    async def _ensure_ready(self, context) -> None:
+        if not self._embedder.is_ready or not self._is_warmup_complete():
+            await context.abort(grpc.StatusCode.UNAVAILABLE, "embedding model is not ready")
 
     async def Embed(self, request, context):
         """Handle a single-shot embedding request."""
+        await self._authorize(context)
+        await self._ensure_ready(context)
         t0 = time.monotonic()
         texts = list(request.texts)
         try:
@@ -91,14 +113,17 @@ class EmbeddingServicer(vector_pb2_grpc.EmbeddingServiceServicer):
 
     async def Health(self, request, context):
         """Return service readiness and model load time."""
+        await self._authorize(context)
         return vector_pb2.HealthResponse(
-            ready=self._embedder.is_ready,
+            ready=self._embedder.is_ready and self._is_warmup_complete(),
             model_name=self._embedder.model_name,
             model_load_time_ms=self._embedder.load_time_ms,
         )
 
     async def ModelInfo(self, request, context):
         """Return metadata about the currently loaded model."""
+        await self._authorize(context)
+        await self._ensure_ready(context)
         return vector_pb2.ModelInfoResponse(
             model_name=self._embedder.model_name,
             dimensions=self._embedder.dimensions,
@@ -108,6 +133,8 @@ class EmbeddingServicer(vector_pb2_grpc.EmbeddingServiceServicer):
 
     async def EmbedStream(self, request_iterator, context) -> AsyncIterator[object]:
         """Handle a bidirectional streaming embedding request."""
+        await self._authorize(context)
+        await self._ensure_ready(context)
         async for req in request_iterator:
             t0 = time.monotonic()
             texts = list(req.texts)
@@ -125,11 +152,16 @@ class EmbeddingServicer(vector_pb2_grpc.EmbeddingServiceServicer):
             )
 
 
-async def start_grpc_server(embedder: EmbedderService, settings: Settings) -> grpc.aio.Server:
+async def start_grpc_server(
+    embedder: EmbedderService,
+    settings: Settings,
+    allowed_keys: set[str],
+    is_warmup_complete: Callable[[], bool],
+) -> grpc.aio.Server:
     """Start the async gRPC server and return the live server instance."""
     server = grpc.aio.server()
     vector_pb2_grpc.add_EmbeddingServiceServicer_to_server(
-        EmbeddingServicer(embedder),
+        EmbeddingServicer(embedder, allowed_keys, is_warmup_complete),
         server,
     )
     address = f"{settings.grpc_host}:{settings.grpc_port}"

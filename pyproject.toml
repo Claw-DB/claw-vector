@@ -22,6 +22,7 @@ dependencies = [
     "transformers>=4.41",
     "structlog>=24.2",
     "prometheus-client>=0.20",
+    "slowapi>=0.1.9",
 ]
 
 [project.optional-dependencies]

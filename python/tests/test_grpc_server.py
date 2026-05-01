@@ -23,7 +23,7 @@ def mock_embedder() -> EmbedderService:
 
 @pytest.fixture()
 def servicer(mock_embedder: EmbedderService) -> EmbeddingServicer:
-    return EmbeddingServicer(mock_embedder)
+    return EmbeddingServicer(mock_embedder, set(), lambda: True)
 
 
 @pytest.mark.asyncio
@@ -46,3 +46,15 @@ async def test_embed_returns_vectors(servicer: EmbeddingServicer) -> None:
     response = await servicer.Embed(request, AsyncMock())
     assert len(response.vectors) == 2
     assert response.model_name == "test-model"
+
+
+@pytest.mark.asyncio
+async def test_embed_rejects_invalid_api_key(mock_embedder: EmbedderService) -> None:
+    secured = EmbeddingServicer(mock_embedder, {"valid"}, lambda: True)
+    context = MagicMock()
+    context.invocation_metadata.return_value = (("authorization", "Bearer invalid"),)
+    context.abort = AsyncMock(side_effect=RuntimeError("aborted"))
+    request = vector_pb2.EmbedRequest(texts=["hello"], normalize=True)
+
+    with pytest.raises(RuntimeError):
+        await secured.Embed(request, context)

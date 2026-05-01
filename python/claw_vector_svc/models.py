@@ -25,6 +25,22 @@ class EmbedResponse(BaseModel):
     latency_ms: int
 
 
+class BatchEmbedRequest(BaseModel):
+    """REST batch embedding request payload."""
+
+    texts: list[str] = Field(..., description="Texts to embed.")
+    normalize: bool = Field(True, description="L2-normalise output vectors.")
+
+
+class BatchEmbedResponse(BaseModel):
+    """REST batch embedding response payload."""
+
+    vectors: list[EmbedVectorSchema]
+    model_name: str
+    total_latency_ms: int
+    per_batch_latency_ms: list[int]
+
+
 class HealthResponse(BaseModel):
     """Health check response."""
 

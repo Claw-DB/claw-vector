@@ -8,7 +8,10 @@ from fastapi.responses import JSONResponse
 from claw_vector_svc.embedder import EmbedderService
 from claw_vector_svc.models import HealthResponse, ModelInfoResponse, ReadyResponse
 
-def make_health_router(get_embedder: Callable[[], EmbedderService | None]) -> APIRouter:
+def make_health_router(
+    get_embedder: Callable[[], EmbedderService | None],
+    is_warmup_complete: Callable[[], bool],
+) -> APIRouter:
     """Return a FastAPI router bound to the provided *embedder* instance."""
     router = APIRouter(tags=["health"])
 
@@ -16,8 +19,9 @@ def make_health_router(get_embedder: Callable[[], EmbedderService | None]) -> AP
     async def health() -> HealthResponse:
         """Liveness probe: the process is up even before the model is ready."""
         embedder = get_embedder()
+        ready = bool(embedder and embedder.is_ready and is_warmup_complete())
         return HealthResponse(
-            ready=bool(embedder and embedder.is_ready),
+            ready=ready,
             model_name=embedder.model_name if embedder else "",
             model_load_time_ms=embedder.load_time_ms if embedder else 0,
         )
@@ -26,7 +30,7 @@ def make_health_router(get_embedder: Callable[[], EmbedderService | None]) -> AP
     async def ready() -> JSONResponse:
         """Readiness probe that returns 503 until the model is loaded."""
         embedder = get_embedder()
-        if embedder is not None and embedder.is_ready:
+        if embedder is not None and embedder.is_ready and is_warmup_complete():
             return JSONResponse(ReadyResponse(ready=True).model_dump(), status_code=200)
         return JSONResponse(ReadyResponse(ready=False).model_dump(), status_code=503)
 
