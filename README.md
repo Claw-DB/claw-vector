@@ -175,8 +175,15 @@ HTTP endpoints:
 - `GET /health`
 - `GET /ready`
 - `POST /embed`
+- `POST /batch-embed`
 - `GET /model-info`
 - `GET /metrics`
+
+Authentication:
+
+- HTTP requests accept `X-Claw-Api-Key`.
+- gRPC requests accept `x-claw-api-key` (Rust server) or `authorization: Bearer <key>` (Python embedding service).
+- When keys are configured, unauthorized requests return `401` (HTTP) or `Unauthenticated` (gRPC).
 
 Example request:
 
@@ -221,6 +228,10 @@ Example response shape:
 | `batch_size` | `64` | builder | Max texts per embedding request. |
 | `embedding_timeout_ms` | `5000` | builder | gRPC timeout for embedding calls. |
 | `num_threads` | available parallelism | builder | Rayon worker count for index operations. |
+| `default_workspace_id` | `default` | builder, `CLAW_DEFAULT_WORKSPACE_ID` | Default tenant/workspace id used when a request does not provide one. |
+| `api_key_store_path` | `claw_vector_auth.db` | builder, `CLAW_API_KEY_STORE_PATH` | SQLite database used by Rust gRPC auth key store. |
+| `rate_limit_rps` | `100` | builder, `CLAW_RATE_LIMIT_RPS` | Default per-workspace request rate limit for Rust gRPC APIs. |
+| `require_auth` | `true` in release, `false` in tests | builder, `CLAW_REQUIRE_AUTH` | Enable or disable auth checks (intended for local development/testing only when false). |
 | `CLAW_GRPC_ADDR` | `0.0.0.0:50051` | env | Listen address for the Rust gRPC server binary. |
 
 ### Python embedding service
@@ -238,6 +249,9 @@ Example response shape:
 | `NORMALIZE_EMBEDDINGS` | `true` | Whether embeddings are normalized by default. |
 | `ONNX_MODEL_PATH` | unset | Optional ONNX model path for alternate inference. |
 | `MAX_SEQUENCE_LENGTH` | `256` | Max token length exposed in model metadata responses. |
+| `CLAW_API_KEY` | unset | Single API key accepted by Python HTTP/gRPC endpoints. |
+| `CLAW_API_KEYS` | unset | Comma-separated list of API keys accepted by Python HTTP/gRPC endpoints. |
+| `EMBED_RATE_LIMIT_PER_MINUTE` | `200` | Per-API-key HTTP request limit for `/embed`. |
 
 ## Testing And Validation
 
