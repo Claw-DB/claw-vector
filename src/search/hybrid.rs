@@ -28,6 +28,17 @@ impl HybridSearcher {
     /// Execute hybrid search and return fused ranked results.
     #[instrument(skip(self, query))]
     pub async fn search(&self, query: HybridQuery) -> VectorResult<SearchResponse> {
+        let workspace_id = self.ann.collection_manager.config.default_workspace_id.clone();
+        self.search_in_workspace(&workspace_id, query).await
+    }
+
+    /// Execute hybrid search scoped to a workspace.
+    #[instrument(skip(self, query))]
+    pub async fn search_in_workspace(
+        &self,
+        workspace_id: &str,
+        query: HybridQuery,
+    ) -> VectorResult<SearchResponse> {
         query.validate()?;
 
         let started = Instant::now();
@@ -60,7 +71,7 @@ impl HybridSearcher {
             match text.as_deref() {
                 Some(text) if !text.trim().is_empty() => {
                     self.store
-                        .keyword_search(&query.collection, text, keyword_candidates)
+                        .keyword_search(workspace_id, &query.collection, text, keyword_candidates)
                         .await
                 }
                 _ => Ok(Vec::new()),
@@ -71,7 +82,7 @@ impl HybridSearcher {
             if query.alpha <= 0.0 {
                 Ok(SearchResponse::default())
             } else {
-                self.ann.search(ann_query).await
+                self.ann.search_in_workspace(workspace_id, ann_query).await
             }
         };
 
@@ -80,7 +91,12 @@ impl HybridSearcher {
         let keyword_rows = keyword_rows?;
 
         let keyword_results = self
-            .build_keyword_results(&query.collection, &keyword_rows, query.include_vectors)
+            .build_keyword_results(
+                workspace_id,
+                &query.collection,
+                &keyword_rows,
+                query.include_vectors,
+            )
             .await?;
 
         let mut fused = fuse_results(query.alpha, ann_response.results, keyword_results);
@@ -112,6 +128,7 @@ impl HybridSearcher {
 
     async fn build_keyword_results(
         &self,
+        workspace_id: &str,
         collection: &str,
         rows: &[(usize, crate::types::VectorRecord, f32)],
         include_vectors: bool,
@@ -126,7 +143,7 @@ impl HybridSearcher {
                 Some(
                     self.ann
                         .collection_manager
-                        .read_vector_by_internal_id(collection, *internal_id)
+                        .read_vector_by_internal_id(workspace_id, collection, *internal_id)
                         .await?,
                 )
             } else {

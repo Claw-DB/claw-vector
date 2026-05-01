@@ -431,7 +431,11 @@ async fn flat_to_hnsw_migration() {
             .unwrap();
     }
 
-    let collection = engine.collections.get_collection("docs").await.unwrap();
+    let collection = engine
+        .collections
+        .get_collection(&engine.config.default_workspace_id, "docs")
+        .await
+        .unwrap();
     assert_eq!(collection.index_type, claw_vector::IndexType::HNSW);
 }
 

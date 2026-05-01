@@ -1,5 +1,6 @@
 // search/rerank.rs — post-retrieval reranking strategies.
 use std::cmp::Ordering;
+use std::collections::HashMap;
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -151,6 +152,9 @@ pub async fn apply_reranker_config(
 ) -> VectorResult<Vec<SearchResult>> {
     match config {
         None | Some(RerankerConfig::None) => Ok(results),
+        Some(RerankerConfig::Composite(configs)) => {
+            apply_composite_reranker(query, results, configs).await
+        }
         Some(config) => build_reranker(config).rerank(query, results).await,
     }
 }
@@ -170,17 +174,92 @@ pub fn reranker_needs_vectors(config: Option<&RerankerConfig>) -> bool {
 fn build_reranker(config: &RerankerConfig) -> Box<dyn Reranker + Send + Sync> {
     match config {
         RerankerConfig::None => Box::new(CompositeReranker(Vec::new())),
-        RerankerConfig::Diversity { lambda } => Box::new(DiversityReranker { lambda: *lambda }),
+        RerankerConfig::Diversity { lambda, .. } => Box::new(DiversityReranker { lambda: *lambda }),
         RerankerConfig::Recency {
-            weight,
+            boost,
             half_life_days,
+            ..
         } => Box::new(RecencyReranker {
-            recency_weight: *weight,
+            recency_weight: *boost,
             half_life_days: *half_life_days,
         }),
         RerankerConfig::Composite(configs) => Box::new(CompositeReranker(
             configs.iter().map(build_reranker).collect(),
         )),
+    }
+}
+
+async fn apply_composite_reranker(
+    query: &[f32],
+    results: Vec<SearchResult>,
+    configs: &[RerankerConfig],
+) -> VectorResult<Vec<SearchResult>> {
+    if configs.is_empty() {
+        return Ok(results);
+    }
+
+    let mut current = results;
+    let mut aggregate_scores: HashMap<uuid::Uuid, f32> = HashMap::new();
+    let mut by_id: HashMap<uuid::Uuid, SearchResult> = HashMap::new();
+
+    for config in configs {
+        let reranked = build_reranker(config).rerank(query, current).await?;
+        let normalized = normalize_scores(reranked);
+        let stage_weight = stage_weight(config);
+        current = normalized.clone();
+
+        for result in normalized {
+            *aggregate_scores.entry(result.id).or_insert(0.0) += stage_weight * result.score;
+            by_id.insert(result.id, result);
+        }
+    }
+
+    let mut final_results = by_id
+        .into_iter()
+        .filter_map(|(id, mut result)| {
+            let final_score = aggregate_scores.get(&id).copied()?;
+            result.score = final_score;
+            Some(result)
+        })
+        .collect::<Vec<_>>();
+    sort_results_desc(&mut final_results);
+    Ok(final_results)
+}
+
+fn normalize_scores(mut results: Vec<SearchResult>) -> Vec<SearchResult> {
+    if results.is_empty() {
+        return results;
+    }
+
+    let min_score = results
+        .iter()
+        .map(|result| result.score)
+        .fold(f32::INFINITY, f32::min);
+    let max_score = results
+        .iter()
+        .map(|result| result.score)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let range = max_score - min_score;
+
+    if range.abs() < f32::EPSILON {
+        for result in &mut results {
+            result.score = 1.0;
+        }
+        return results;
+    }
+
+    for result in &mut results {
+        result.score = ((result.score - min_score) / range).clamp(0.0, 1.0);
+    }
+    results
+}
+
+fn stage_weight(config: &RerankerConfig) -> f32 {
+    match config {
+        RerankerConfig::None => 0.0,
+        RerankerConfig::Diversity { weight, .. } => *weight,
+        RerankerConfig::Recency { weight, .. } => *weight,
+        RerankerConfig::Composite(_) => 1.0,
     }
 }
 
@@ -225,4 +304,60 @@ fn sort_results_desc(results: &mut [SearchResult]) {
             .partial_cmp(&left.score)
             .unwrap_or(Ordering::Equal)
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{Duration, Utc};
+
+    use super::apply_reranker_config;
+    use crate::types::{RerankerConfig, SearchResult};
+
+    fn fixture_result(
+        id: uuid::Uuid,
+        vector: Vec<f32>,
+        created_at: chrono::DateTime<Utc>,
+    ) -> SearchResult {
+        SearchResult {
+            id,
+            score: 0.5,
+            vector: Some(vector),
+            metadata: serde_json::json!({}),
+            text: None,
+            created_at,
+        }
+    }
+
+    #[tokio::test]
+    async fn composite_diversity_then_recency_is_deterministic() {
+        let now = Utc::now();
+        let first_id = uuid::Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap();
+        let second_id = uuid::Uuid::parse_str("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb").unwrap();
+        let third_id = uuid::Uuid::parse_str("cccccccc-cccc-cccc-cccc-cccccccccccc").unwrap();
+        let query = vec![1.0, 0.0, 0.0];
+        let results = vec![
+            fixture_result(first_id, vec![0.95, 0.05, 0.0], now),
+            fixture_result(second_id, vec![0.5, 0.5, 0.0], now - Duration::days(1)),
+            fixture_result(third_id, vec![0.2, 0.8, 0.0], now - Duration::days(30)),
+        ];
+
+        let config = RerankerConfig::Composite(vec![
+            RerankerConfig::Diversity {
+                lambda: 0.8,
+                weight: 0.6,
+            },
+            RerankerConfig::Recency {
+                boost: 0.5,
+                half_life_days: 7.0,
+                weight: 0.4,
+            },
+        ]);
+
+        let reranked = apply_reranker_config(&query, results, Some(&config))
+            .await
+            .unwrap();
+        let ids = reranked.into_iter().map(|item| item.id).collect::<Vec<_>>();
+
+        assert_eq!(ids, vec![first_id, second_id, third_id]);
+    }
 }

@@ -30,12 +30,23 @@ impl AnnSearcher {
     /// Execute a nearest-neighbour search and return filtered, ranked results with metrics.
     #[instrument(skip(self, query))]
     pub async fn search(&self, query: SearchQuery) -> VectorResult<SearchResponse> {
+        let workspace_id = self.collection_manager.config.default_workspace_id.clone();
+        self.search_in_workspace(&workspace_id, query).await
+    }
+
+    /// Execute a nearest-neighbour search scoped to a workspace.
+    #[instrument(skip(self, query))]
+    pub async fn search_in_workspace(
+        &self,
+        workspace_id: &str,
+        query: SearchQuery,
+    ) -> VectorResult<SearchResponse> {
         query.validate()?;
 
         let started = Instant::now();
         let collection = self
             .collection_manager
-            .get_collection(&query.collection)
+            .get_collection(workspace_id, &query.collection)
             .await?;
         if query.vector.len() != collection.dimensions {
             return Err(VectorError::DimensionMismatch {
@@ -51,11 +62,12 @@ impl AnnSearcher {
 
         let raw_candidates = {
             let indexes = self.collection_manager.indexes.read().await;
+            let key = format!("{workspace_id}::{}", query.collection);
             let index = indexes
-                .get(&query.collection)
+                .get(&key)
                 .ok_or_else(|| VectorError::NotFound {
                     entity: "collection".into(),
-                    id: query.collection.clone(),
+                    id: format!("{workspace_id}/{}", query.collection),
                 })?;
             index.search(&query.vector, candidate_limit, ef_search)?
         };
@@ -67,7 +79,7 @@ impl AnnSearcher {
         let records = self
             .collection_manager
             .store
-            .bulk_internal_to_uuid(&query.collection, &candidate_ids)
+            .bulk_internal_to_uuid(workspace_id, &query.collection, &candidate_ids)
             .await?;
         let mut records_by_id: HashMap<usize, crate::types::VectorRecord> =
             records.into_iter().collect();
@@ -90,7 +102,7 @@ impl AnnSearcher {
             let vector = if needs_vectors {
                 Some(
                     self.collection_manager
-                        .read_vector_by_internal_id(&query.collection, internal_id)
+                        .read_vector_by_internal_id(workspace_id, &query.collection, internal_id)
                         .await?,
                 )
             } else {
@@ -159,6 +171,33 @@ impl AnnSearcher {
             ef_search: None,
             reranker: None,
         })
+        .await
+    }
+
+    /// Embed free-form text and execute workspace-scoped ANN search.
+    #[instrument(skip(self, embedding_client, text))]
+    pub async fn search_by_text_in_workspace(
+        &self,
+        workspace_id: &str,
+        collection: &str,
+        text: &str,
+        top_k: usize,
+        embedding_client: &EmbeddingClient,
+    ) -> VectorResult<SearchResponse> {
+        let vector = embedding_client.embed_one(text).await?;
+        self.search_in_workspace(
+            workspace_id,
+            SearchQuery {
+                collection: collection.to_string(),
+                vector,
+                top_k,
+                filter: None,
+                include_vectors: false,
+                include_metadata: true,
+                ef_search: None,
+                reranker: None,
+            },
+        )
         .await
     }
 

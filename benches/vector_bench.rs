@@ -361,6 +361,79 @@ fn bench_hybrid_search_1k(c: &mut Criterion) {
     });
 }
 
+fn bench_tenant_isolated_search_10k(c: &mut Criterion) {
+    let runtime = runtime();
+    c.bench_function("bench_tenant_isolated_search_10k", |b| {
+        b.iter_batched(
+            || {
+                runtime.block_on(async {
+                    let harness = create_harness(32).await;
+                    for workspace_idx in 0..5 {
+                        let workspace = format!("ws-{workspace_idx}");
+                        let collection = "bench";
+                        harness
+                            .engine
+                            .create_collection_in_workspace(
+                                &workspace,
+                                collection,
+                                32,
+                                DistanceMetric::Cosine,
+                            )
+                            .await
+                            .expect("create tenant collection failed");
+                        for index in 0..200 {
+                            let vector = (0..32)
+                                .map(|dim| ((workspace_idx + index + dim) % 97) as f32 / 97.0)
+                                .collect::<Vec<_>>();
+                            harness
+                                .engine
+                                .upsert_vector_in_workspace(
+                                    &workspace,
+                                    collection,
+                                    vector,
+                                    json!({"workspace": workspace}),
+                                )
+                                .await
+                                .expect("tenant upsert failed");
+                        }
+                    }
+                    harness
+                })
+            },
+            |harness| {
+                runtime.block_on(async move {
+                    let workspace = "ws-3";
+                    let response = harness
+                        .engine
+                        .search_in_workspace(
+                            workspace,
+                            SearchQuery {
+                                collection: "bench".into(),
+                                vector: vec![0.42; 32],
+                                top_k: 10,
+                                filter: None,
+                                include_vectors: false,
+                                include_metadata: true,
+                                ef_search: Some(64),
+                                reranker: None,
+                            },
+                        )
+                        .await
+                        .expect("tenant search failed");
+                    assert!(response.results.iter().all(|hit| {
+                        hit.metadata
+                            .get("workspace")
+                            .and_then(|value| value.as_str())
+                            .map(|value| value == workspace)
+                            .unwrap_or(false)
+                    }));
+                });
+            },
+            BatchSize::LargeInput,
+        );
+    });
+}
+
 criterion_group!(
     benches,
     bench_upsert_single,
@@ -371,5 +444,6 @@ criterion_group!(
     bench_filter_and_search_10k,
     bench_embedding_cache_hit,
     bench_hybrid_search_1k,
+    bench_tenant_isolated_search_10k,
 );
 criterion_main!(benches);

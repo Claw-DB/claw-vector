@@ -4,7 +4,7 @@
 // hnsw_rs's own file-format which carries awkward lifetime constraints.
 use std::{
     collections::{HashMap, HashSet},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicUsize, Ordering},
         RwLock,
@@ -12,6 +12,7 @@ use std::{
 };
 
 use hnsw_rs::prelude::*;
+use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
 use crate::{
@@ -104,8 +105,6 @@ pub struct HnswIndex {
     points: RwLock<HashMap<usize, Vec<f32>>>,
     /// Expected vector dimensionality.
     dimensions: usize,
-    /// Distance metric in use.
-    distance: DistanceMetric,
     /// Count of live (non-deleted) elements.
     element_count: AtomicUsize,
     /// Maximum capacity the index was configured for.
@@ -138,7 +137,6 @@ impl HnswIndex {
             inner,
             points: RwLock::new(HashMap::new()),
             dimensions,
-            distance,
             element_count: AtomicUsize::new(0),
             max_elements: config.max_elements,
             deleted: RwLock::new(HashSet::new()),
@@ -245,23 +243,14 @@ impl HnswIndex {
         self.len() == 0
     }
 
-    /// Persist the index under `path`.
-    ///
-    /// Writes `hnsw.meta.json` and `hnsw.points.bin`.
+    /// Persist the index under `path` using an atomic tmp+rename strategy.
     #[instrument(skip(self))]
-    pub fn save(&self, path: &Path) -> VectorResult<()> {
+    pub fn save(&self, path: &Path, collection_id: &str) -> VectorResult<()> {
         std::fs::create_dir_all(path)?;
         let pts = self
             .points
             .read()
             .map_err(|e| VectorError::Index(e.to_string()))?;
-        let meta = serde_json::json!({
-            "distance": self.distance,
-            "dimensions": self.dimensions,
-            "element_count": self.element_count.load(Ordering::Relaxed),
-            "max_elements": self.max_elements,
-        });
-        std::fs::write(path.join("hnsw.meta.json"), serde_json::to_string(&meta)?)?;
 
         // Binary format: [n: u64][(id: u64)(v0..vN: f32) ...]
         let mut buf = Vec::with_capacity(8 + pts.len() * (8 + self.dimensions * 4));
@@ -272,7 +261,25 @@ impl HnswIndex {
                 buf.extend_from_slice(&v.to_le_bytes());
             }
         }
-        std::fs::write(path.join("hnsw.points.bin"), buf)?;
+
+        let final_path = index_file(path, collection_id);
+        let tmp_path = tmp_index_file(path, collection_id);
+        std::fs::write(&tmp_path, &buf)?;
+        std::fs::rename(&tmp_path, &final_path)?;
+
+        let checksum = blake3::hash(&buf).to_hex().to_string();
+        let manifest = CollectionManifest {
+            collection_id: collection_id.to_string(),
+            index_type: "hnsw".to_string(),
+            vector_count: pts.len(),
+            dimensions: self.dimensions,
+            saved_at_unix_ms: chrono::Utc::now().timestamp_millis(),
+            index_checksum_blake3: checksum,
+        };
+        std::fs::write(
+            manifest_file(path, collection_id),
+            serde_json::to_string_pretty(&manifest)?,
+        )?;
         Ok(())
     }
 
@@ -280,20 +287,35 @@ impl HnswIndex {
     #[instrument(skip(config))]
     pub fn load(
         path: &Path,
+        collection_id: &str,
         config: &VectorConfig,
         distance: DistanceMetric,
     ) -> VectorResult<Self> {
-        let meta: serde_json::Value =
-            serde_json::from_reader(std::fs::File::open(path.join("hnsw.meta.json"))?)?;
-        let dimensions = meta["dimensions"]
-            .as_u64()
-            .ok_or_else(|| VectorError::Index("missing dimensions".into()))?
-            as usize;
-        let max_elements = meta["max_elements"]
-            .as_u64()
-            .unwrap_or(config.max_elements as u64) as usize;
+        let final_path = index_file(path, collection_id);
+        let tmp_path = tmp_index_file(path, collection_id);
+        if tmp_path.exists() {
+            if final_path.exists() {
+                let _ = std::fs::remove_file(&tmp_path);
+            } else {
+                std::fs::rename(&tmp_path, &final_path)?;
+            }
+        }
 
-        let raw = std::fs::read(path.join("hnsw.points.bin"))?;
+        let manifest_path = manifest_file(path, collection_id);
+        let manifest: CollectionManifest = serde_json::from_reader(std::fs::File::open(&manifest_path)?)?;
+        let dimensions = manifest.dimensions;
+        let max_elements = config.max_elements;
+
+        let raw = std::fs::read(&final_path)?;
+        let checksum = blake3::hash(&raw).to_hex().to_string();
+        if checksum != manifest.index_checksum_blake3 {
+            tracing::warn!(
+                collection_id = %collection_id,
+                expected = %manifest.index_checksum_blake3,
+                got = %checksum,
+                "HNSW index checksum mismatch; continuing with best-effort load"
+            );
+        }
         let points = decode_points_bin(&raw, dimensions)?;
 
         let mut cfg = config.clone();
@@ -314,6 +336,18 @@ impl HnswIndex {
             layers: self.inner.max_level_observed(),
         }
     }
+}
+
+fn index_file(path: &Path, collection_id: &str) -> PathBuf {
+    path.join(format!("{collection_id}.hnsw"))
+}
+
+fn tmp_index_file(path: &Path, collection_id: &str) -> PathBuf {
+    path.join(format!("{collection_id}.hnsw.tmp"))
+}
+
+fn manifest_file(path: &Path, collection_id: &str) -> PathBuf {
+    path.join(format!("{collection_id}.manifest.json"))
 }
 
 fn build_inner(
@@ -363,3 +397,20 @@ fn decode_points_bin(raw: &[u8], dimensions: usize) -> VectorResult<Vec<(usize, 
 // SAFETY: Hnsw<'static, T, D> owns all its data; interior mutation is guarded by parking_lot.
 unsafe impl Send for HnswIndex {}
 unsafe impl Sync for HnswIndex {}
+
+/// Persisted metadata for a saved HNSW index file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollectionManifest {
+    /// Collection identifier associated with this index artifact.
+    pub collection_id: String,
+    /// Index implementation name (currently always `hnsw`).
+    pub index_type: String,
+    /// Number of vectors present when the index was persisted.
+    pub vector_count: usize,
+    /// Vector dimensionality encoded in the index.
+    pub dimensions: usize,
+    /// Unix timestamp in milliseconds when the index was saved.
+    pub saved_at_unix_ms: i64,
+    /// Blake3 checksum of the `.hnsw` file contents.
+    pub index_checksum_blake3: String,
+}

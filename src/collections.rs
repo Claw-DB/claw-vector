@@ -39,7 +39,7 @@ impl CollectionManager {
             mmap_files: Arc::new(RwLock::new(HashMap::new())),
         };
 
-        let collections = manager.store.list_collections().await?;
+        let collections = manager.store.list_all_collections().await?;
         for collection in collections {
             manager.restore_collection(&collection).await?;
         }
@@ -51,6 +51,7 @@ impl CollectionManager {
     #[instrument(skip(self))]
     pub async fn create_collection(
         &self,
+        workspace_id: &str,
         name: &str,
         dimensions: usize,
         distance: DistanceMetric,
@@ -63,6 +64,7 @@ impl CollectionManager {
         }
 
         let collection = Collection {
+            workspace_id: workspace_id.to_string(),
             name: name.to_string(),
             dimensions,
             distance,
@@ -74,56 +76,58 @@ impl CollectionManager {
             m_connections: self.config.m_connections,
         };
 
-        let dir = self.collection_dir(name);
+        let dir = self.collection_dir(workspace_id, name);
         std::fs::create_dir_all(&dir)?;
         let mmap = MmapVectorFile::create(
-            &self.vector_file_path(name),
+            &self.vector_file_path(workspace_id, name),
             dimensions,
             self.config.max_elements.max(1),
         )?;
         let index = IndexSelector::new(dimensions, distance, &self.config);
 
-        self.store.create_collection(&collection).await?;
+        self.store.create_collection(workspace_id, &collection).await?;
 
-        self.indexes.write().await.insert(name.to_string(), index);
-        self.mmap_files.write().await.insert(name.to_string(), mmap);
+        let key = self.collection_key(workspace_id, name);
+        self.indexes.write().await.insert(key.clone(), index);
+        self.mmap_files.write().await.insert(key, mmap);
 
         Ok(collection)
     }
 
     /// Fetch a collection definition by name.
     #[instrument(skip(self))]
-    pub async fn get_collection(&self, name: &str) -> VectorResult<Collection> {
-        self.store.get_collection(name).await
+    pub async fn get_collection(&self, workspace_id: &str, name: &str) -> VectorResult<Collection> {
+        self.store.get_collection(workspace_id, name).await
     }
 
     /// Delete a collection and all of its persisted state.
     #[instrument(skip(self))]
-    pub async fn delete_collection(&self, name: &str) -> VectorResult<()> {
-        let removed_index = self.indexes.write().await.remove(name);
-        let removed_mmap = self.mmap_files.write().await.remove(name);
+    pub async fn delete_collection(&self, workspace_id: &str, name: &str) -> VectorResult<()> {
+        let key = self.collection_key(workspace_id, name);
+        let removed_index = self.indexes.write().await.remove(&key);
+        let removed_mmap = self.mmap_files.write().await.remove(&key);
 
         if removed_index.is_none() || removed_mmap.is_none() {
-            let exists = self.store.get_collection(name).await.is_ok();
+            let exists = self.store.get_collection(workspace_id, name).await.is_ok();
             if !exists {
                 return Err(VectorError::NotFound {
                     entity: "collection".into(),
-                    id: name.to_string(),
+                    id: format!("{workspace_id}/{name}"),
                 });
             }
         }
 
-        if let Err(err) = self.store.delete_collection(name).await {
+        if let Err(err) = self.store.delete_collection(workspace_id, name).await {
             if let Some(index) = removed_index {
-                self.indexes.write().await.insert(name.to_string(), index);
+                self.indexes.write().await.insert(key.clone(), index);
             }
             if let Some(mmap) = removed_mmap {
-                self.mmap_files.write().await.insert(name.to_string(), mmap);
+                self.mmap_files.write().await.insert(key.clone(), mmap);
             }
             return Err(err);
         }
 
-        let collection_dir = self.collection_dir(name);
+        let collection_dir = self.collection_dir(workspace_id, name);
         if collection_dir.exists() {
             std::fs::remove_dir_all(collection_dir)?;
         }
@@ -133,14 +137,17 @@ impl CollectionManager {
 
     /// List all persisted collections.
     #[instrument(skip(self))]
-    pub async fn list_collections(&self) -> VectorResult<Vec<Collection>> {
-        self.store.list_collections().await
+    pub async fn list_collections(&self, workspace_id: &str) -> VectorResult<Vec<Collection>> {
+        self.store.list_collections(workspace_id).await
     }
 
     /// Insert a single vector record into its collection.
     #[instrument(skip(self, record))]
-    pub async fn insert_vector(&self, record: VectorRecord) -> VectorResult<Uuid> {
-        let collection = self.store.get_collection(&record.collection).await?;
+    pub async fn insert_vector(&self, workspace_id: &str, record: VectorRecord) -> VectorResult<Uuid> {
+        let collection = self
+            .store
+            .get_collection(workspace_id, &record.collection)
+            .await?;
         if record.vector.len() != collection.dimensions {
             return Err(VectorError::DimensionMismatch {
                 expected: collection.dimensions,
@@ -148,35 +155,48 @@ impl CollectionManager {
             });
         }
 
-        let internal_id = self.store.next_internal_id(&record.collection).await?;
+        let internal_id = self
+            .store
+            .next_internal_id(workspace_id, &record.collection)
+            .await?;
         let record_id = record.id;
-        self.apply_in_memory_insert(&record, internal_id).await?;
+        self.apply_in_memory_insert(workspace_id, &record, internal_id)
+            .await?;
 
-        if let Err(err) = self.store.insert_record(&record, internal_id).await {
-            self.rollback_in_memory_insert(&record.collection, internal_id)
+        if let Err(err) = self
+            .store
+            .insert_record(workspace_id, &record, internal_id)
+            .await
+        {
+            self.rollback_in_memory_insert(workspace_id, &record.collection, internal_id)
                 .await;
             return Err(err);
         }
 
         if let Err(err) = self
             .store
-            .increment_vector_count(&record.collection, 1)
+            .increment_vector_count(workspace_id, &record.collection, 1)
             .await
         {
-            let _ = self.store.delete_record(record.id).await;
-            self.rollback_in_memory_insert(&record.collection, internal_id)
+            let _ = self.store.delete_record(workspace_id, record.id).await;
+            self.rollback_in_memory_insert(workspace_id, &record.collection, internal_id)
                 .await;
             return Err(err);
         }
 
-        self.sync_collection_index_type(&record.collection).await?;
+        self.sync_collection_index_type(workspace_id, &record.collection)
+            .await?;
 
         Ok(record_id)
     }
 
     /// Insert multiple vector records atomically.
     #[instrument(skip(self, records))]
-    pub async fn insert_batch(&self, records: Vec<VectorRecord>) -> VectorResult<Vec<Uuid>> {
+    pub async fn insert_batch(
+        &self,
+        workspace_id: &str,
+        records: Vec<VectorRecord>,
+    ) -> VectorResult<Vec<Uuid>> {
         if records.is_empty() {
             return Ok(Vec::new());
         }
@@ -187,7 +207,10 @@ impl CollectionManager {
         let mut ids = Vec::with_capacity(records.len());
 
         for record in records {
-            let collection = self.store.get_collection(&record.collection).await?;
+            let collection = self
+                .store
+                .get_collection(workspace_id, &record.collection)
+                .await?;
             if record.vector.len() != collection.dimensions {
                 return Err(VectorError::DimensionMismatch {
                     expected: collection.dimensions,
@@ -200,7 +223,10 @@ impl CollectionManager {
                 *next_id += 1;
                 current
             } else {
-                let current = self.store.next_internal_id(&record.collection).await?;
+                let current = self
+                    .store
+                    .next_internal_id(workspace_id, &record.collection)
+                    .await?;
                 next_ids.insert(record.collection.clone(), current + 1);
                 current
             };
@@ -211,26 +237,34 @@ impl CollectionManager {
         }
 
         for (record, internal_id) in &staged {
-            if let Err(err) = self.apply_in_memory_insert(record, *internal_id).await {
-                self.rollback_batch_in_memory(&staged).await;
+            if let Err(err) = self
+                .apply_in_memory_insert(workspace_id, record, *internal_id)
+                .await
+            {
+                self.rollback_batch_in_memory(workspace_id, &staged).await;
                 return Err(err);
             }
         }
 
-        if let Err(err) = self.store.batch_insert_records(&staged).await {
-            self.rollback_batch_in_memory(&staged).await;
+        if let Err(err) = self.store.batch_insert_records(workspace_id, &staged).await {
+            self.rollback_batch_in_memory(workspace_id, &staged).await;
             return Err(err);
         }
 
         for (collection, delta) in deltas {
-            if let Err(err) = self.store.increment_vector_count(&collection, delta).await {
+            if let Err(err) = self
+                .store
+                .increment_vector_count(workspace_id, &collection, delta)
+                .await
+            {
                 for (record, _) in &staged {
-                    let _ = self.store.delete_record(record.id).await;
+                    let _ = self.store.delete_record(workspace_id, record.id).await;
                 }
-                self.rollback_batch_in_memory(&staged).await;
+                self.rollback_batch_in_memory(workspace_id, &staged).await;
                 return Err(err);
             }
-            self.sync_collection_index_type(&collection).await?;
+            self.sync_collection_index_type(workspace_id, &collection)
+                .await?;
         }
 
         Ok(ids)
@@ -238,8 +272,13 @@ impl CollectionManager {
 
     /// Delete a vector from a collection by UUID.
     #[instrument(skip(self))]
-    pub async fn delete_vector(&self, collection: &str, id: Uuid) -> VectorResult<bool> {
-        let (record, internal_id) = match self.store.get_record(id).await {
+    pub async fn delete_vector(
+        &self,
+        workspace_id: &str,
+        collection: &str,
+        id: Uuid,
+    ) -> VectorResult<bool> {
+        let (record, internal_id) = match self.store.get_record(workspace_id, id).await {
             Ok(value) => value,
             Err(VectorError::NotFound { .. }) => return Ok(false),
             Err(err) => return Err(err),
@@ -251,36 +290,45 @@ impl CollectionManager {
 
         {
             let mut indexes = self.indexes.write().await;
+            let key = self.collection_key(workspace_id, collection);
             let index = indexes
-                .get_mut(collection)
+                .get_mut(&key)
                 .ok_or_else(|| VectorError::NotFound {
                     entity: "collection".into(),
-                    id: collection.to_string(),
+                    id: format!("{workspace_id}/{collection}"),
                 })?;
             index.delete(internal_id)?;
         }
 
         {
             let mut mmap_files = self.mmap_files.write().await;
+            let key = self.collection_key(workspace_id, collection);
             let mmap = mmap_files
-                .get_mut(collection)
+                .get_mut(&key)
                 .ok_or_else(|| VectorError::NotFound {
                     entity: "collection".into(),
-                    id: collection.to_string(),
+                    id: format!("{workspace_id}/{collection}"),
                 })?;
             mmap.delete_vector(internal_id)?;
             mmap.flush()?;
         }
 
-        self.store.delete_record(id).await?;
-        self.store.increment_vector_count(collection, -1).await?;
+        self.store.delete_record(workspace_id, id).await?;
+        self.store
+            .increment_vector_count(workspace_id, collection, -1)
+            .await?;
         Ok(true)
     }
 
     /// Load a full vector record, including its raw vector from the mmap file.
     #[instrument(skip(self))]
-    pub async fn get_vector(&self, collection: &str, id: Uuid) -> VectorResult<VectorRecord> {
-        let (mut record, internal_id) = self.store.get_record(id).await?;
+    pub async fn get_vector(
+        &self,
+        workspace_id: &str,
+        collection: &str,
+        id: Uuid,
+    ) -> VectorResult<VectorRecord> {
+        let (mut record, internal_id) = self.store.get_record(workspace_id, id).await?;
         if record.collection != collection {
             return Err(VectorError::NotFound {
                 entity: "record".into(),
@@ -289,11 +337,12 @@ impl CollectionManager {
         }
 
         let mmap_files = self.mmap_files.read().await;
+        let key = self.collection_key(workspace_id, collection);
         let mmap = mmap_files
-            .get(collection)
+            .get(&key)
             .ok_or_else(|| VectorError::NotFound {
                 entity: "collection".into(),
-                id: collection.to_string(),
+                id: format!("{workspace_id}/{collection}"),
             })?;
         record.vector = mmap.read_vector(internal_id)?;
         Ok(record)
@@ -303,8 +352,10 @@ impl CollectionManager {
     #[instrument(skip(self))]
     pub async fn persist_indexes(&self) -> VectorResult<()> {
         let indexes = self.indexes.read().await;
-        for (name, index) in indexes.iter() {
-            index.save(&self.config.index_dir, name)?;
+        for (key, index) in indexes.iter() {
+            if let Some((workspace_id, name)) = key.split_once("::") {
+                index.save(&self.config.index_dir, workspace_id, name)?;
+            }
         }
         Ok(())
     }
@@ -312,15 +363,17 @@ impl CollectionManager {
     /// Read a raw vector by collection and internal id.
     pub async fn read_vector_by_internal_id(
         &self,
+        workspace_id: &str,
         collection: &str,
         internal_id: usize,
     ) -> VectorResult<Vec<f32>> {
         let mmap_files = self.mmap_files.read().await;
+        let key = self.collection_key(workspace_id, collection);
         let mmap = mmap_files
-            .get(collection)
+            .get(&key)
             .ok_or_else(|| VectorError::NotFound {
                 entity: "collection".into(),
-                id: collection.to_string(),
+                id: format!("{workspace_id}/{collection}"),
             })?;
         mmap.read_vector(internal_id)
     }
@@ -336,10 +389,10 @@ impl CollectionManager {
     }
 
     async fn restore_collection(&self, collection: &Collection) -> VectorResult<()> {
-        let dir = self.collection_dir(&collection.name);
+        let dir = self.collection_dir(&collection.workspace_id, &collection.name);
         std::fs::create_dir_all(&dir)?;
 
-        let mmap_path = self.vector_file_path(&collection.name);
+        let mmap_path = self.vector_file_path(&collection.workspace_id, &collection.name);
         let mmap = if mmap_path.exists() {
             MmapVectorFile::open(&mmap_path)?
         } else {
@@ -354,6 +407,7 @@ impl CollectionManager {
 
         let index = match IndexSelector::load(
             &self.config.index_dir,
+            &collection.workspace_id,
             &collection.name,
             &self.config,
             collection.distance,
@@ -370,15 +424,17 @@ impl CollectionManager {
             }
         };
 
+        let key = self.collection_key(&collection.workspace_id, &collection.name);
         self.indexes
             .write()
             .await
-            .insert(collection.name.clone(), index);
+            .insert(key.clone(), index);
         self.mmap_files
             .write()
             .await
-            .insert(collection.name.clone(), mmap);
-        self.sync_collection_index_type(&collection.name).await?;
+            .insert(key, mmap);
+        self.sync_collection_index_type(&collection.workspace_id, &collection.name)
+            .await?;
         Ok(())
     }
 
@@ -391,7 +447,7 @@ impl CollectionManager {
             IndexSelector::new(collection.dimensions, collection.distance, &self.config);
         let records = self
             .store
-            .list_records_for_collection(&collection.name)
+            .list_records_for_collection(&collection.workspace_id, &collection.name)
             .await?;
         let mut items = Vec::with_capacity(records.len());
         for (_, internal_id) in records {
@@ -404,66 +460,76 @@ impl CollectionManager {
 
     async fn apply_in_memory_insert(
         &self,
+        workspace_id: &str,
         record: &VectorRecord,
         internal_id: usize,
     ) -> VectorResult<()> {
         {
             let mut mmap_files = self.mmap_files.write().await;
+            let key = self.collection_key(workspace_id, &record.collection);
             let mmap =
                 mmap_files
-                    .get_mut(&record.collection)
+                    .get_mut(&key)
                     .ok_or_else(|| VectorError::NotFound {
                         entity: "collection".into(),
-                        id: record.collection.clone(),
+                        id: format!("{workspace_id}/{}", record.collection),
                     })?;
             mmap.write_vector(internal_id, &record.vector)?;
             mmap.flush()?;
         }
 
         let mut indexes = self.indexes.write().await;
+        let key = self.collection_key(workspace_id, &record.collection);
         let index = indexes
-            .get_mut(&record.collection)
+            .get_mut(&key)
             .ok_or_else(|| VectorError::NotFound {
                 entity: "collection".into(),
-                id: record.collection.clone(),
+                id: format!("{workspace_id}/{}", record.collection),
             })?;
         index.insert(internal_id, record.vector.clone(), &self.config)?;
         Ok(())
     }
 
-    async fn rollback_in_memory_insert(&self, collection: &str, internal_id: usize) {
-        if let Some(index) = self.indexes.write().await.get_mut(collection) {
+    async fn rollback_in_memory_insert(
+        &self,
+        workspace_id: &str,
+        collection: &str,
+        internal_id: usize,
+    ) {
+        let key = self.collection_key(workspace_id, collection);
+        if let Some(index) = self.indexes.write().await.get_mut(&key) {
             let _ = index.delete(internal_id);
         }
-        if let Some(mmap) = self.mmap_files.write().await.get_mut(collection) {
+        if let Some(mmap) = self.mmap_files.write().await.get_mut(&key) {
             let _ = mmap.delete_vector(internal_id);
             let _ = mmap.flush();
         }
     }
 
-    async fn rollback_batch_in_memory(&self, staged: &[(VectorRecord, usize)]) {
+    async fn rollback_batch_in_memory(&self, workspace_id: &str, staged: &[(VectorRecord, usize)]) {
         for (record, internal_id) in staged.iter().rev() {
-            self.rollback_in_memory_insert(&record.collection, *internal_id)
+            self.rollback_in_memory_insert(workspace_id, &record.collection, *internal_id)
                 .await;
         }
     }
 
-    fn collection_dir(&self, name: &str) -> PathBuf {
-        self.config.index_dir.join(name)
+    fn collection_dir(&self, workspace_id: &str, name: &str) -> PathBuf {
+        self.config.index_dir.join(workspace_id).join(name)
     }
 
-    fn vector_file_path(&self, name: &str) -> PathBuf {
-        self.collection_dir(name).join("vectors.bin")
+    fn vector_file_path(&self, workspace_id: &str, name: &str) -> PathBuf {
+        self.collection_dir(workspace_id, name).join("vectors.bin")
     }
 
-    async fn sync_collection_index_type(&self, collection: &str) -> VectorResult<()> {
+    async fn sync_collection_index_type(&self, workspace_id: &str, collection: &str) -> VectorResult<()> {
         let current_type = {
             let indexes = self.indexes.read().await;
+            let key = self.collection_key(workspace_id, collection);
             let index = indexes
-                .get(collection)
+                .get(&key)
                 .ok_or_else(|| VectorError::NotFound {
                     entity: "collection".into(),
-                    id: collection.to_string(),
+                    id: format!("{workspace_id}/{collection}"),
                 })?;
             if index.is_hnsw() {
                 IndexType::HNSW
@@ -472,7 +538,11 @@ impl CollectionManager {
             }
         };
         self.store
-            .update_collection_index_type(collection, current_type)
+            .update_collection_index_type(workspace_id, collection, current_type)
             .await
+    }
+
+    fn collection_key(&self, workspace_id: &str, name: &str) -> String {
+        format!("{workspace_id}::{name}")
     }
 }

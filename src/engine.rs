@@ -78,20 +78,57 @@ impl VectorEngine {
         distance: DistanceMetric,
     ) -> VectorResult<Collection> {
         self.collections
-            .create_collection(name, dimensions, distance)
+            .create_collection(&self.config.default_workspace_id, name, dimensions, distance)
+            .await
+    }
+
+    /// Create a collection inside a specific workspace.
+    #[instrument(skip(self))]
+    pub async fn create_collection_in_workspace(
+        &self,
+        workspace_id: &str,
+        name: &str,
+        dimensions: usize,
+        distance: DistanceMetric,
+    ) -> VectorResult<Collection> {
+        self.collections
+            .create_collection(workspace_id, name, dimensions, distance)
             .await
     }
 
     /// Delete a collection and all of its persisted state.
     #[instrument(skip(self))]
     pub async fn delete_collection(&self, name: &str) -> VectorResult<()> {
-        self.collections.delete_collection(name).await
+        self.collections
+            .delete_collection(&self.config.default_workspace_id, name)
+            .await
+    }
+
+    /// Delete a collection inside a specific workspace.
+    #[instrument(skip(self))]
+    pub async fn delete_collection_in_workspace(
+        &self,
+        workspace_id: &str,
+        name: &str,
+    ) -> VectorResult<()> {
+        self.collections.delete_collection(workspace_id, name).await
     }
 
     /// List all collections.
     #[instrument(skip(self))]
     pub async fn list_collections(&self) -> VectorResult<Vec<Collection>> {
-        self.collections.list_collections().await
+        self.collections
+            .list_collections(&self.config.default_workspace_id)
+            .await
+    }
+
+    /// List collections scoped to a workspace.
+    #[instrument(skip(self))]
+    pub async fn list_collections_in_workspace(
+        &self,
+        workspace_id: &str,
+    ) -> VectorResult<Vec<Collection>> {
+        self.collections.list_collections(workspace_id).await
     }
 
     /// Embed text, persist the record, and return its UUID.
@@ -106,7 +143,25 @@ impl VectorEngine {
         let record = VectorRecord::new(collection, vector)
             .with_text(text.to_string())
             .with_metadata(metadata);
-        self.collections.insert_vector(record).await
+        self.collections
+            .insert_vector(&self.config.default_workspace_id, record)
+            .await
+    }
+
+    /// Embed and insert a record in a workspace-scoped collection.
+    #[instrument(skip(self, text, metadata))]
+    pub async fn upsert_in_workspace(
+        &self,
+        workspace_id: &str,
+        collection: &str,
+        text: &str,
+        metadata: serde_json::Value,
+    ) -> VectorResult<uuid::Uuid> {
+        let vector = self.embedding_client.embed_one(text).await?;
+        let record = VectorRecord::new(collection, vector)
+            .with_text(text.to_string())
+            .with_metadata(metadata);
+        self.collections.insert_vector(workspace_id, record).await
     }
 
     /// Embed and insert multiple text records.
@@ -130,7 +185,34 @@ impl VectorEngine {
                     .with_metadata(metadata)
             })
             .collect::<Vec<_>>();
-        self.collections.insert_batch(records).await
+        self.collections
+            .insert_batch(&self.config.default_workspace_id, records)
+            .await
+    }
+
+    /// Embed and insert multiple records in a workspace-scoped collection.
+    #[instrument(skip(self, items))]
+    pub async fn upsert_batch_in_workspace(
+        &self,
+        workspace_id: &str,
+        collection: &str,
+        items: Vec<(String, serde_json::Value)>,
+    ) -> VectorResult<Vec<uuid::Uuid>> {
+        let texts = items
+            .iter()
+            .map(|(text, _)| text.clone())
+            .collect::<Vec<_>>();
+        let embeddings = self.embedding_client.embed(texts).await?;
+        let records = items
+            .into_iter()
+            .zip(embeddings.into_iter())
+            .map(|((text, metadata), vector)| {
+                VectorRecord::new(collection, vector)
+                    .with_text(text)
+                    .with_metadata(metadata)
+            })
+            .collect::<Vec<_>>();
+        self.collections.insert_batch(workspace_id, records).await
     }
 
     /// Insert a raw vector directly.
@@ -142,13 +224,38 @@ impl VectorEngine {
         metadata: serde_json::Value,
     ) -> VectorResult<uuid::Uuid> {
         let record = VectorRecord::new(collection, vector).with_metadata(metadata);
-        self.collections.insert_vector(record).await
+        self.collections
+            .insert_vector(&self.config.default_workspace_id, record)
+            .await
+    }
+
+    /// Insert a raw vector directly into a workspace-scoped collection.
+    #[instrument(skip(self, vector, metadata))]
+    pub async fn upsert_vector_in_workspace(
+        &self,
+        workspace_id: &str,
+        collection: &str,
+        vector: Vec<f32>,
+        metadata: serde_json::Value,
+    ) -> VectorResult<uuid::Uuid> {
+        let record = VectorRecord::new(collection, vector).with_metadata(metadata);
+        self.collections.insert_vector(workspace_id, record).await
     }
 
     /// Execute ANN search.
     #[instrument(skip(self, query))]
     pub async fn search(&self, query: SearchQuery) -> VectorResult<SearchResponse> {
         self.ann_searcher.search(query).await
+    }
+
+    /// Execute ANN search scoped to a workspace.
+    #[instrument(skip(self, query))]
+    pub async fn search_in_workspace(
+        &self,
+        workspace_id: &str,
+        query: SearchQuery,
+    ) -> VectorResult<SearchResponse> {
+        self.ann_searcher.search_in_workspace(workspace_id, query).await
     }
 
     /// Execute ANN search from raw text.
@@ -174,6 +281,33 @@ impl VectorEngine {
             .await
     }
 
+    /// Execute ANN search from raw text scoped to a workspace.
+    #[instrument(skip(self, text))]
+    pub async fn search_text_in_workspace(
+        &self,
+        workspace_id: &str,
+        collection: &str,
+        text: &str,
+        top_k: usize,
+    ) -> VectorResult<SearchResponse> {
+        let vector = self.embedding_client.embed_one(text).await?;
+        self.ann_searcher
+            .search_in_workspace(
+                workspace_id,
+                SearchQuery {
+                    collection: collection.to_string(),
+                    vector,
+                    top_k,
+                    filter: None,
+                    include_vectors: false,
+                    include_metadata: true,
+                    ef_search: None,
+                    reranker: None,
+                },
+            )
+            .await
+    }
+
     /// Execute hybrid search.
     #[instrument(skip(self, query))]
     pub async fn hybrid_search(&self, query: HybridQuery) -> VectorResult<SearchResponse> {
@@ -183,13 +317,39 @@ impl VectorEngine {
     /// Delete a vector record by UUID.
     #[instrument(skip(self))]
     pub async fn delete(&self, collection: &str, id: uuid::Uuid) -> VectorResult<bool> {
-        self.collections.delete_vector(collection, id).await
+        self.collections
+            .delete_vector(&self.config.default_workspace_id, collection, id)
+            .await
+    }
+
+    /// Delete a vector by UUID from a workspace-scoped collection.
+    #[instrument(skip(self))]
+    pub async fn delete_in_workspace(
+        &self,
+        workspace_id: &str,
+        collection: &str,
+        id: uuid::Uuid,
+    ) -> VectorResult<bool> {
+        self.collections.delete_vector(workspace_id, collection, id).await
     }
 
     /// Fetch a vector record by UUID.
     #[instrument(skip(self))]
     pub async fn get(&self, collection: &str, id: uuid::Uuid) -> VectorResult<VectorRecord> {
-        self.collections.get_vector(collection, id).await
+        self.collections
+            .get_vector(&self.config.default_workspace_id, collection, id)
+            .await
+    }
+
+    /// Fetch a vector by UUID from a workspace-scoped collection.
+    #[instrument(skip(self))]
+    pub async fn get_in_workspace(
+        &self,
+        workspace_id: &str,
+        collection: &str,
+        id: uuid::Uuid,
+    ) -> VectorResult<VectorRecord> {
+        self.collections.get_vector(workspace_id, collection, id).await
     }
 
     /// Persist indexes and close the underlying store.
@@ -205,7 +365,7 @@ impl VectorEngine {
     pub async fn stats(&self) -> EngineStats {
         let collections = self
             .collections
-            .list_collections()
+            .list_collections(&self.config.default_workspace_id)
             .await
             .unwrap_or_default();
         let cache_stats = self

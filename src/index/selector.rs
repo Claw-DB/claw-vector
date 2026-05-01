@@ -127,8 +127,8 @@ impl IndexSelector {
 
     /// Persist the index under `<dir>/<collection>/`.
     #[instrument(skip(self))]
-    pub fn save(&self, dir: &Path, collection: &str) -> VectorResult<()> {
-        let col_dir = dir.join(collection);
+    pub fn save(&self, dir: &Path, workspace_id: &str, collection: &str) -> VectorResult<()> {
+        let col_dir = dir.join(workspace_id).join(collection);
         std::fs::create_dir_all(&col_dir)?;
         let kind = if self.is_hnsw() { "hnsw" } else { "flat" };
         std::fs::write(
@@ -142,7 +142,7 @@ impl IndexSelector {
                     serde_json::to_string(&flat.all_vectors()?)?,
                 )?;
             }
-            IndexSelector::Hnsw(hnsw) => hnsw.save(&col_dir)?,
+            IndexSelector::Hnsw(hnsw) => hnsw.save(&col_dir, collection)?,
         }
         Ok(())
     }
@@ -151,12 +151,13 @@ impl IndexSelector {
     #[instrument(skip(config))]
     pub fn load(
         dir: &Path,
+        workspace_id: &str,
         collection: &str,
         config: &VectorConfig,
         distance: DistanceMetric,
         dimensions: usize,
     ) -> VectorResult<Self> {
-        let col_dir = dir.join(collection);
+        let col_dir = dir.join(workspace_id).join(collection);
         let meta: serde_json::Value =
             serde_json::from_reader(std::fs::File::open(col_dir.join("index.meta.json"))?)?;
         match meta["index_type"]
@@ -171,7 +172,7 @@ impl IndexSelector {
                 Ok(IndexSelector::Flat(flat))
             }
             "hnsw" => Ok(IndexSelector::Hnsw(Box::new(HnswIndex::load(
-                &col_dir, config, distance,
+                &col_dir, collection, config, distance,
             )?))),
             other => Err(VectorError::Index(format!("unknown index_type '{other}'"))),
         }

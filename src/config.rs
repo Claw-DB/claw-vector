@@ -31,6 +31,14 @@ pub struct VectorConfig {
     pub embedding_timeout_ms: u64,
     /// Number of rayon threads for parallel index operations.
     pub num_threads: usize,
+    /// Default workspace id used when callers do not provide one explicitly.
+    pub default_workspace_id: String,
+    /// SQLite path for API key storage.
+    pub api_key_store_path: PathBuf,
+    /// Default request budget per workspace in requests/second.
+    pub rate_limit_rps: u32,
+    /// Require authentication for inbound API requests.
+    pub require_auth: bool,
 }
 
 impl Default for VectorConfig {
@@ -50,6 +58,10 @@ impl Default for VectorConfig {
             num_threads: std::thread::available_parallelism()
                 .unwrap_or(NonZeroUsize::new(4).unwrap())
                 .get(),
+            default_workspace_id: "default".into(),
+            api_key_store_path: PathBuf::from("claw_vector_auth.db"),
+            rate_limit_rps: 100,
+            require_auth: !cfg!(test),
         }
     }
 }
@@ -66,6 +78,10 @@ impl VectorConfig {
     /// - `CLAW_VECTOR_DB_PATH`
     /// - `CLAW_VECTOR_INDEX_DIR`
     /// - `CLAW_EMBEDDING_URL`
+    /// - `CLAW_DEFAULT_WORKSPACE_ID`
+    /// - `CLAW_API_KEY_STORE_PATH`
+    /// - `CLAW_RATE_LIMIT_RPS`
+    /// - `CLAW_REQUIRE_AUTH`
     pub fn from_env() -> Self {
         let mut cfg = VectorConfig::default();
         if let Ok(v) = std::env::var("CLAW_VECTOR_DB_PATH") {
@@ -76,6 +92,20 @@ impl VectorConfig {
         }
         if let Ok(v) = std::env::var("CLAW_EMBEDDING_URL") {
             cfg.embedding_service_url = v;
+        }
+        if let Ok(v) = std::env::var("CLAW_DEFAULT_WORKSPACE_ID") {
+            cfg.default_workspace_id = v;
+        }
+        if let Ok(v) = std::env::var("CLAW_API_KEY_STORE_PATH") {
+            cfg.api_key_store_path = PathBuf::from(v);
+        }
+        if let Ok(v) = std::env::var("CLAW_RATE_LIMIT_RPS") {
+            if let Ok(parsed) = v.parse::<u32>() {
+                cfg.rate_limit_rps = parsed.max(1);
+            }
+        }
+        if let Ok(v) = std::env::var("CLAW_REQUIRE_AUTH") {
+            cfg.require_auth = matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
         }
         cfg
     }
@@ -162,6 +192,30 @@ impl VectorConfigBuilder {
         self
     }
 
+    /// Set the default workspace id.
+    pub fn default_workspace_id(mut self, workspace_id: impl Into<String>) -> Self {
+        self.inner.default_workspace_id = workspace_id.into();
+        self
+    }
+
+    /// Set the API key store path.
+    pub fn api_key_store_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.inner.api_key_store_path = path.into();
+        self
+    }
+
+    /// Set the workspace rate limit in requests per second.
+    pub fn rate_limit_rps(mut self, rps: u32) -> Self {
+        self.inner.rate_limit_rps = rps.max(1);
+        self
+    }
+
+    /// Set whether request authentication is required.
+    pub fn require_auth(mut self, require_auth: bool) -> Self {
+        self.inner.require_auth = require_auth;
+        self
+    }
+
     /// Validate and return the completed [`VectorConfig`].
     ///
     /// # Errors
@@ -182,6 +236,14 @@ impl VectorConfigBuilder {
             return Err(VectorError::Config(
                 "ef_construction must be >= m_connections".into(),
             ));
+        }
+        if cfg.default_workspace_id.trim().is_empty() {
+            return Err(VectorError::Config(
+                "default_workspace_id must not be empty".into(),
+            ));
+        }
+        if cfg.rate_limit_rps == 0 {
+            return Err(VectorError::Config("rate_limit_rps must be > 0".into()));
         }
         Ok(cfg)
     }

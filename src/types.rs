@@ -125,6 +125,8 @@ impl VectorRecord {
 /// Describes a named collection of vectors with a shared dimension and distance metric.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Collection {
+    /// Workspace identifier used for tenant isolation.
+    pub workspace_id: String,
     /// Unique collection name.
     pub name: String,
     /// Expected vector dimensionality for all records in this collection.
@@ -257,13 +259,17 @@ pub enum RerankerConfig {
     Diversity {
         /// Relevance-vs-diversity balance in the range `[0.0, 1.0]`.
         lambda: f32,
+        /// Stage weight used by the composite reranker.
+        weight: f32,
     },
     /// Boost recently created records.
     Recency {
-        /// Weight applied to the recency boost.
-        weight: f32,
+        /// Strength of the recency boost.
+        boost: f32,
         /// Exponential half-life in days.
         half_life_days: f32,
+        /// Stage weight used by the composite reranker.
+        weight: f32,
     },
     /// Apply multiple rerankers in sequence.
     Composite(Vec<RerankerConfig>),
