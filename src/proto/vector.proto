@@ -46,6 +46,94 @@ message ModelInfoResponse {
   string device = 4;
 }
 
+message CreateCollectionRequest {
+  string name = 1;
+  uint32 dimensions = 2;
+  string distance_metric = 3;
+}
+
+message DeleteCollectionRequest {
+  string name = 1;
+}
+
+message UpsertVectorRequest {
+  string collection = 1;
+  repeated float vector = 2;
+  string text = 3;
+  string metadata_json = 4;
+}
+
+message SearchRequest {
+  string collection = 1;
+  repeated float vector = 2;
+  string text = 3;
+  uint32 top_k = 4;
+  bool include_vectors = 5;
+  bool include_metadata = 6;
+  string filter_json = 7;
+}
+
+message StatsRequest {
+  string collection = 1;
+}
+
+message ListRequest {
+  uint32 page_size = 1;
+  uint32 page = 2;
+}
+
+message CollectionInfo {
+  string id = 1;
+  string name = 2;
+  uint32 dimensions = 3;
+  string distance_metric = 4;
+  string index_type = 5;
+  uint64 vector_count = 6;
+  int64 last_modified_at = 7;
+}
+
+message DeleteResult {
+  uint64 records_removed = 1;
+}
+
+message UpsertResult {
+  string id = 1;
+}
+
+message SearchHit {
+  string id = 1;
+  float score = 2;
+  repeated float vector = 3;
+  string metadata_json = 4;
+  string text = 5;
+}
+
+message SearchMetricsProto {
+  uint32 query_vector_dims = 1;
+  uint32 candidates_evaluated = 2;
+  uint32 post_filter_count = 3;
+  uint64 latency_us = 4;
+}
+
+message SearchResponseProto {
+  repeated SearchHit results = 1;
+  SearchMetricsProto metrics = 2;
+}
+
+message CollectionStatsResponse {
+  uint64 vector_count = 1;
+  string index_type = 2;
+  uint32 dimensions = 3;
+  int64 last_modified_at = 4;
+}
+
+message ListCollectionsResponse {
+  repeated CollectionInfo collections = 1;
+  uint32 page = 2;
+  uint32 page_size = 3;
+  uint32 total = 4;
+}
+
 // ─── Service ─────────────────────────────────────────────────────────────────
 
 // EmbeddingService: generates dense embeddings for arbitrary text inputs.
@@ -61,4 +149,13 @@ service EmbeddingService {
 
   // Bidirectional streaming embed for large or continuous workloads.
   rpc EmbedStream(stream EmbedRequest) returns (stream EmbedResponse);
+}
+
+service VectorService {
+  rpc CreateCollection(CreateCollectionRequest) returns (CollectionInfo);
+  rpc DeleteCollection(DeleteCollectionRequest) returns (DeleteResult);
+  rpc UpsertVector(UpsertVectorRequest) returns (UpsertResult);
+  rpc SearchVectors(SearchRequest) returns (SearchResponseProto);
+  rpc GetCollectionStats(StatsRequest) returns (CollectionStatsResponse);
+  rpc ListCollections(ListRequest) returns (ListCollectionsResponse);
 }
