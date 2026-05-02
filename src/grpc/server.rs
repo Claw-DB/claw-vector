@@ -7,12 +7,8 @@ use std::{
 use sha2::{Digest, Sha256};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{
-    metadata::MetadataValue,
-    service::interceptor::InterceptedService,
-    transport::Server,
-    Request,
-    Response,
-    Status,
+    metadata::MetadataValue, service::interceptor::InterceptedService, transport::Server, Request,
+    Response, Status,
 };
 
 use crate::{
@@ -22,9 +18,10 @@ use crate::{
         embedding_service_server::{EmbeddingService, EmbeddingServiceServer},
         vector_service_server::{VectorService, VectorServiceServer},
         CollectionInfo, CollectionStatsResponse, CreateCollectionRequest, DeleteCollectionRequest,
-        DeleteResult, EmbedRequest, EmbedResponse, HealthRequest, HealthResponse, ListCollectionsResponse,
-        ListRequest, ModelInfoRequest, ModelInfoResponse, SearchMetricsProto, SearchRequest,
-        SearchResponseProto, StatsRequest, UpsertResult, UpsertVectorRequest,
+        DeleteResult, EmbedRequest, EmbedResponse, HealthRequest, HealthResponse,
+        ListCollectionsResponse, ListRequest, ModelInfoRequest, ModelInfoResponse,
+        SearchMetricsProto, SearchRequest, SearchResponseProto, StatsRequest, UpsertResult,
+        UpsertVectorRequest,
     },
     types::{DistanceMetric, SearchQuery},
     VectorError,
@@ -228,7 +225,12 @@ impl VectorService for VectorServiceImpl {
         let metric = parse_distance_metric(&req.distance_metric)?;
         let created = self
             .engine
-            .create_collection_in_workspace(&workspace_id, &req.name, req.dimensions as usize, metric)
+            .create_collection_in_workspace(
+                &workspace_id,
+                &req.name,
+                req.dimensions as usize,
+                metric,
+            )
             .await
             .map_err(Status::from)?;
         let info = collection_to_proto(&created);
@@ -276,9 +278,8 @@ impl VectorService for VectorServiceImpl {
         let metadata = if req.metadata_json.trim().is_empty() {
             serde_json::json!({})
         } else {
-            serde_json::from_str(&req.metadata_json).map_err(|err| {
-                Status::invalid_argument(format!("invalid metadata_json: {err}"))
-            })?
+            serde_json::from_str(&req.metadata_json)
+                .map_err(|err| Status::invalid_argument(format!("invalid metadata_json: {err}")))?
         };
 
         let id = if !req.vector.is_empty() {
@@ -311,13 +312,14 @@ impl VectorService for VectorServiceImpl {
         let trace = self.trace_from_request(&request);
         let workspace_id = self.workspace_from_request(&request);
         let req = request.into_inner();
-        let filter = if req.filter_json.trim().is_empty() {
-            None
-        } else {
-            Some(serde_json::from_str(&req.filter_json).map_err(|err| {
-                Status::invalid_argument(format!("invalid filter_json: {err}"))
-            })?)
-        };
+        let filter =
+            if req.filter_json.trim().is_empty() {
+                None
+            } else {
+                Some(serde_json::from_str(&req.filter_json).map_err(|err| {
+                    Status::invalid_argument(format!("invalid filter_json: {err}"))
+                })?)
+            };
 
         let query = if !req.vector.is_empty() {
             SearchQuery {
@@ -570,12 +572,14 @@ mod tests {
     fn interceptor_rejects_invalid_api_key() {
         let mut interceptor = interceptor_for_test(true, 100);
         let mut request = Request::new(());
-        request
-            .metadata_mut()
-            .insert(WORKSPACE_HEADER, MetadataValue::try_from("ws-test").unwrap());
-        request
-            .metadata_mut()
-            .insert(API_KEY_HEADER, MetadataValue::try_from("wrong-key").unwrap());
+        request.metadata_mut().insert(
+            WORKSPACE_HEADER,
+            MetadataValue::try_from("ws-test").unwrap(),
+        );
+        request.metadata_mut().insert(
+            API_KEY_HEADER,
+            MetadataValue::try_from("wrong-key").unwrap(),
+        );
 
         let result = interceptor.call(request);
         assert!(matches!(result, Err(status) if status.code() == tonic::Code::Unauthenticated));
@@ -587,9 +591,10 @@ mod tests {
         let mut last: Result<Request<()>, Status> = Ok(Request::new(()));
         for _ in 0..101 {
             let mut request = Request::new(());
-            request
-                .metadata_mut()
-                .insert(WORKSPACE_HEADER, MetadataValue::try_from("ws-test").unwrap());
+            request.metadata_mut().insert(
+                WORKSPACE_HEADER,
+                MetadataValue::try_from("ws-test").unwrap(),
+            );
             last = interceptor.call(request);
         }
 

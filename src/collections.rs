@@ -85,7 +85,9 @@ impl CollectionManager {
         )?;
         let index = IndexSelector::new(dimensions, distance, &self.config);
 
-        self.store.create_collection(workspace_id, &collection).await?;
+        self.store
+            .create_collection(workspace_id, &collection)
+            .await?;
 
         let key = self.collection_key(workspace_id, name);
         self.indexes.write().await.insert(key.clone(), index);
@@ -143,7 +145,11 @@ impl CollectionManager {
 
     /// Insert a single vector record into its collection.
     #[instrument(skip(self, record))]
-    pub async fn insert_vector(&self, workspace_id: &str, record: VectorRecord) -> VectorResult<Uuid> {
+    pub async fn insert_vector(
+        &self,
+        workspace_id: &str,
+        record: VectorRecord,
+    ) -> VectorResult<Uuid> {
         let collection = self
             .store
             .get_collection(workspace_id, &record.collection)
@@ -291,12 +297,10 @@ impl CollectionManager {
         {
             let mut indexes = self.indexes.write().await;
             let key = self.collection_key(workspace_id, collection);
-            let index = indexes
-                .get_mut(&key)
-                .ok_or_else(|| VectorError::NotFound {
-                    entity: "collection".into(),
-                    id: format!("{workspace_id}/{collection}"),
-                })?;
+            let index = indexes.get_mut(&key).ok_or_else(|| VectorError::NotFound {
+                entity: "collection".into(),
+                id: format!("{workspace_id}/{collection}"),
+            })?;
             index.delete(internal_id)?;
         }
 
@@ -338,12 +342,10 @@ impl CollectionManager {
 
         let mmap_files = self.mmap_files.read().await;
         let key = self.collection_key(workspace_id, collection);
-        let mmap = mmap_files
-            .get(&key)
-            .ok_or_else(|| VectorError::NotFound {
-                entity: "collection".into(),
-                id: format!("{workspace_id}/{collection}"),
-            })?;
+        let mmap = mmap_files.get(&key).ok_or_else(|| VectorError::NotFound {
+            entity: "collection".into(),
+            id: format!("{workspace_id}/{collection}"),
+        })?;
         record.vector = mmap.read_vector(internal_id)?;
         Ok(record)
     }
@@ -369,12 +371,10 @@ impl CollectionManager {
     ) -> VectorResult<Vec<f32>> {
         let mmap_files = self.mmap_files.read().await;
         let key = self.collection_key(workspace_id, collection);
-        let mmap = mmap_files
-            .get(&key)
-            .ok_or_else(|| VectorError::NotFound {
-                entity: "collection".into(),
-                id: format!("{workspace_id}/{collection}"),
-            })?;
+        let mmap = mmap_files.get(&key).ok_or_else(|| VectorError::NotFound {
+            entity: "collection".into(),
+            id: format!("{workspace_id}/{collection}"),
+        })?;
         mmap.read_vector(internal_id)
     }
 
@@ -425,14 +425,8 @@ impl CollectionManager {
         };
 
         let key = self.collection_key(&collection.workspace_id, &collection.name);
-        self.indexes
-            .write()
-            .await
-            .insert(key.clone(), index);
-        self.mmap_files
-            .write()
-            .await
-            .insert(key, mmap);
+        self.indexes.write().await.insert(key.clone(), index);
+        self.mmap_files.write().await.insert(key, mmap);
         self.sync_collection_index_type(&collection.workspace_id, &collection.name)
             .await?;
         Ok(())
@@ -467,25 +461,22 @@ impl CollectionManager {
         {
             let mut mmap_files = self.mmap_files.write().await;
             let key = self.collection_key(workspace_id, &record.collection);
-            let mmap =
-                mmap_files
-                    .get_mut(&key)
-                    .ok_or_else(|| VectorError::NotFound {
-                        entity: "collection".into(),
-                        id: format!("{workspace_id}/{}", record.collection),
-                    })?;
+            let mmap = mmap_files
+                .get_mut(&key)
+                .ok_or_else(|| VectorError::NotFound {
+                    entity: "collection".into(),
+                    id: format!("{workspace_id}/{}", record.collection),
+                })?;
             mmap.write_vector(internal_id, &record.vector)?;
             mmap.flush()?;
         }
 
         let mut indexes = self.indexes.write().await;
         let key = self.collection_key(workspace_id, &record.collection);
-        let index = indexes
-            .get_mut(&key)
-            .ok_or_else(|| VectorError::NotFound {
-                entity: "collection".into(),
-                id: format!("{workspace_id}/{}", record.collection),
-            })?;
+        let index = indexes.get_mut(&key).ok_or_else(|| VectorError::NotFound {
+            entity: "collection".into(),
+            id: format!("{workspace_id}/{}", record.collection),
+        })?;
         index.insert(internal_id, record.vector.clone(), &self.config)?;
         Ok(())
     }
@@ -521,16 +512,18 @@ impl CollectionManager {
         self.collection_dir(workspace_id, name).join("vectors.bin")
     }
 
-    async fn sync_collection_index_type(&self, workspace_id: &str, collection: &str) -> VectorResult<()> {
+    async fn sync_collection_index_type(
+        &self,
+        workspace_id: &str,
+        collection: &str,
+    ) -> VectorResult<()> {
         let current_type = {
             let indexes = self.indexes.read().await;
             let key = self.collection_key(workspace_id, collection);
-            let index = indexes
-                .get(&key)
-                .ok_or_else(|| VectorError::NotFound {
-                    entity: "collection".into(),
-                    id: format!("{workspace_id}/{collection}"),
-                })?;
+            let index = indexes.get(&key).ok_or_else(|| VectorError::NotFound {
+                entity: "collection".into(),
+                id: format!("{workspace_id}/{collection}"),
+            })?;
             if index.is_hnsw() {
                 IndexType::HNSW
             } else {

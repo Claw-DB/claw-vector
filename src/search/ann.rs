@@ -63,12 +63,10 @@ impl AnnSearcher {
         let raw_candidates = {
             let indexes = self.collection_manager.indexes.read().await;
             let key = format!("{workspace_id}::{}", query.collection);
-            let index = indexes
-                .get(&key)
-                .ok_or_else(|| VectorError::NotFound {
-                    entity: "collection".into(),
-                    id: format!("{workspace_id}/{}", query.collection),
-                })?;
+            let index = indexes.get(&key).ok_or_else(|| VectorError::NotFound {
+                entity: "collection".into(),
+                id: format!("{workspace_id}/{}", query.collection),
+            })?;
             index.search(&query.vector, candidate_limit, ef_search)?
         };
 

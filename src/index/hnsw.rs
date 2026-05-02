@@ -302,7 +302,8 @@ impl HnswIndex {
         }
 
         let manifest_path = manifest_file(path, collection_id);
-        let manifest: CollectionManifest = serde_json::from_reader(std::fs::File::open(&manifest_path)?)?;
+        let manifest: CollectionManifest =
+            serde_json::from_reader(std::fs::File::open(&manifest_path)?)?;
         let dimensions = manifest.dimensions;
         let max_elements = config.max_elements;
 

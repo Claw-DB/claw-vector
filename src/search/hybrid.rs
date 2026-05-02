@@ -28,7 +28,12 @@ impl HybridSearcher {
     /// Execute hybrid search and return fused ranked results.
     #[instrument(skip(self, query))]
     pub async fn search(&self, query: HybridQuery) -> VectorResult<SearchResponse> {
-        let workspace_id = self.ann.collection_manager.config.default_workspace_id.clone();
+        let workspace_id = self
+            .ann
+            .collection_manager
+            .config
+            .default_workspace_id
+            .clone();
         self.search_in_workspace(&workspace_id, query).await
     }
 

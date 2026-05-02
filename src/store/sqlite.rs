@@ -66,7 +66,11 @@ impl VectorStore {
     }
 
     /// Persist a new collection definition (upsert).
-    pub async fn create_collection(&self, workspace_id: &str, col: &Collection) -> VectorResult<()> {
+    pub async fn create_collection(
+        &self,
+        workspace_id: &str,
+        col: &Collection,
+    ) -> VectorResult<()> {
         sqlx::query(
             r#"INSERT INTO collections
                (workspace_id, name, dimensions, distance, index_type, ef_construction, m_connections,
@@ -190,7 +194,11 @@ impl VectorStore {
     }
 
     /// Retrieve a record and its internal identifier by UUID.
-    pub async fn get_record(&self, workspace_id: &str, id: Uuid) -> VectorResult<(VectorRecord, usize)> {
+    pub async fn get_record(
+        &self,
+        workspace_id: &str,
+        id: Uuid,
+    ) -> VectorResult<(VectorRecord, usize)> {
         let row = sqlx::query_as::<_, RecordRow>(
             "SELECT id, internal_id, workspace_id, collection, text, metadata, created_at \
              FROM vector_records WHERE workspace_id = ? AND id = ?",
@@ -212,13 +220,14 @@ impl VectorStore {
     /// Delete a vector record by id and return its previous internal id when found.
     pub async fn delete_record(&self, workspace_id: &str, id: Uuid) -> VectorResult<Option<usize>> {
         let mut tx = self.pool.begin().await?;
-        let internal_id =
-            sqlx::query_scalar::<_, i64>("SELECT internal_id FROM vector_records WHERE workspace_id = ? AND id = ?")
-                .bind(workspace_id)
-                .bind(id.to_string())
-                .fetch_optional(&mut *tx)
-                .await?
-                .map(|value| value as usize);
+        let internal_id = sqlx::query_scalar::<_, i64>(
+            "SELECT internal_id FROM vector_records WHERE workspace_id = ? AND id = ?",
+        )
+        .bind(workspace_id)
+        .bind(id.to_string())
+        .fetch_optional(&mut *tx)
+        .await?
+        .map(|value| value as usize);
 
         if internal_id.is_some() {
             sqlx::query("DELETE FROM vector_records WHERE workspace_id = ? AND id = ?")
@@ -261,16 +270,17 @@ impl VectorStore {
 
     /// Resolve a record UUID to its internal id.
     pub async fn uuid_to_internal(&self, workspace_id: &str, id: Uuid) -> VectorResult<usize> {
-        let internal_id =
-            sqlx::query_scalar::<_, i64>("SELECT internal_id FROM vector_records WHERE workspace_id = ? AND id = ?")
-                .bind(workspace_id)
-                .bind(id.to_string())
-                .fetch_optional(&self.pool)
-                .await?
-                .ok_or_else(|| VectorError::NotFound {
-                    entity: "record".into(),
-                    id: id.to_string(),
-                })?;
+        let internal_id = sqlx::query_scalar::<_, i64>(
+            "SELECT internal_id FROM vector_records WHERE workspace_id = ? AND id = ?",
+        )
+        .bind(workspace_id)
+        .bind(id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| VectorError::NotFound {
+            entity: "record".into(),
+            id: id.to_string(),
+        })?;
         Ok(internal_id as usize)
     }
 
@@ -377,17 +387,22 @@ impl VectorStore {
     }
 
     /// Return collection storage statistics as tracked in SQLite.
-    pub async fn collection_stats(&self, workspace_id: &str, name: &str) -> VectorResult<CollectionStats> {
-        let vector_count =
-            sqlx::query_scalar::<_, i64>("SELECT vector_count FROM collections WHERE workspace_id = ? AND name = ?")
-                .bind(workspace_id)
-                .bind(name)
-                .fetch_optional(&self.pool)
-                .await?
-                .ok_or_else(|| VectorError::NotFound {
-                    entity: "collection".into(),
-                    id: name.to_string(),
-                })?;
+    pub async fn collection_stats(
+        &self,
+        workspace_id: &str,
+        name: &str,
+    ) -> VectorResult<CollectionStats> {
+        let vector_count = sqlx::query_scalar::<_, i64>(
+            "SELECT vector_count FROM collections WHERE workspace_id = ? AND name = ?",
+        )
+        .bind(workspace_id)
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| VectorError::NotFound {
+            entity: "collection".into(),
+            id: name.to_string(),
+        })?;
 
         let record_bytes = sqlx::query_scalar::<_, i64>(
             "SELECT COALESCE(SUM(LENGTH(id) + LENGTH(IFNULL(text, '')) + LENGTH(metadata) + LENGTH(created_at) + 8), 0) FROM vector_records WHERE workspace_id = ? AND collection = ?",
@@ -412,7 +427,11 @@ impl VectorStore {
     }
 
     /// Return the next available internal id for a collection.
-    pub async fn next_internal_id(&self, workspace_id: &str, collection: &str) -> VectorResult<usize> {
+    pub async fn next_internal_id(
+        &self,
+        workspace_id: &str,
+        collection: &str,
+    ) -> VectorResult<usize> {
         let max_internal_id = sqlx::query_scalar::<_, Option<i64>>(
             "SELECT MAX(internal_id) FROM vector_records WHERE workspace_id = ? AND collection = ?",
         )

@@ -78,7 +78,12 @@ impl VectorEngine {
         distance: DistanceMetric,
     ) -> VectorResult<Collection> {
         self.collections
-            .create_collection(&self.config.default_workspace_id, name, dimensions, distance)
+            .create_collection(
+                &self.config.default_workspace_id,
+                name,
+                dimensions,
+                distance,
+            )
             .await
     }
 
@@ -255,7 +260,9 @@ impl VectorEngine {
         workspace_id: &str,
         query: SearchQuery,
     ) -> VectorResult<SearchResponse> {
-        self.ann_searcher.search_in_workspace(workspace_id, query).await
+        self.ann_searcher
+            .search_in_workspace(workspace_id, query)
+            .await
     }
 
     /// Execute ANN search from raw text.
@@ -330,7 +337,9 @@ impl VectorEngine {
         collection: &str,
         id: uuid::Uuid,
     ) -> VectorResult<bool> {
-        self.collections.delete_vector(workspace_id, collection, id).await
+        self.collections
+            .delete_vector(workspace_id, collection, id)
+            .await
     }
 
     /// Fetch a vector record by UUID.
@@ -349,7 +358,9 @@ impl VectorEngine {
         collection: &str,
         id: uuid::Uuid,
     ) -> VectorResult<VectorRecord> {
-        self.collections.get_vector(workspace_id, collection, id).await
+        self.collections
+            .get_vector(workspace_id, collection, id)
+            .await
     }
 
     /// Persist indexes and close the underlying store.

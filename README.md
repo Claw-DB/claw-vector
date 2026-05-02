@@ -11,6 +11,28 @@ claw-vector is the semantic memory engine behind ClawDB. It combines SQLite-back
 - A Python embedding service built on sentence-transformers with Prometheus metrics and health probes.
 - Rust library and gRPC server entrypoints for application integration.
 
+## Crate At A Glance
+
+- Crate name: `claw-vector`
+- Current crate version: `0.1.1`
+- Rust edition: `2021`
+- MSRV target: `1.75`
+- Primary entrypoint: `VectorEngine`
+- Binary entrypoint: `claw-vector-server`
+
+Install from crates.io:
+
+```toml
+[dependencies]
+claw-vector = "0.1.1"
+```
+
+Or add from CLI:
+
+```bash
+cargo add claw-vector
+```
+
 ## Architecture
 
 ```text
@@ -81,6 +103,25 @@ Available rerankers:
 - `diversity` for MMR-style result diversification
 - `recency` for boosting newer records
 - `composite` for chaining reranking passes
+
+## Public Rust API Overview
+
+Core types you will typically interact with:
+
+- `VectorEngine` for collection lifecycle and query execution.
+- `VectorConfig` for runtime configuration and tuning.
+- `SearchQuery` and `HybridQuery` for ANN and vector+keyword retrieval.
+- `MetadataFilter` for structured filtering on JSON metadata.
+- `BatchSearchQuery` and `BatchUpsertResult` for bulk operations.
+
+Typical request flow in applications:
+
+1. Build `VectorConfig` and initialize `VectorEngine`.
+2. Create or restore a collection.
+3. Upsert records by text (service embeddings) or raw vectors.
+4. Query using ANN or hybrid search.
+5. Inspect `SearchMetrics` for latency and candidate diagnostics.
+6. Close the engine to flush indexes and state.
 
 ## Quick Start
 
@@ -269,6 +310,15 @@ cd python
 pytest tests/
 ```
 
+Additional checks commonly used in CI:
+
+```bash
+cargo clippy --all-targets --all-features -- -D warnings
+cargo fmt --all -- --check
+cargo bench --bench vector_bench --no-run
+ruff check .
+```
+
 The engine test suite covers collection lifecycle, persistence across reopen, hybrid search, metadata filters, embedding cache behavior, and Flat to HNSW migration.
 
 ## Benchmarks And Performance Targets
@@ -300,3 +350,15 @@ cargo bench --bench vector_bench
 - Rust protobuf generation is handled in `build.rs` with vendored `protoc`, so local protobuf installation is not required.
 - SQLite migrations are embedded and applied automatically by the Rust store layer.
 - `docker-compose.yml` provides a ready-to-run embedding service and an optional Rust dev container profile.
+
+## Operational Guidance
+
+- Use workspace isolation (`workspace_id`) in multi-tenant environments to separate data, indexes, and auth/rate-limit scopes.
+- Keep vector dimensions fixed per collection; dimension drift should be handled by creating a new collection and reindexing.
+- For large ingestion jobs, use batch upserts and tune `ef_construction`/`m_connections` before initial load.
+- For low-latency query paths, keep `include_vectors` off unless callers truly need full vector payloads.
+- Back up both SQLite files and index/mmap directories to preserve full recall behavior after restore.
+
+## Release Notes
+
+Version `0.1.1` updates dependency constraints to the latest compatible direct versions, refreshes lockfile resolutions, and expands crate documentation for integration, operations, and CI validation.

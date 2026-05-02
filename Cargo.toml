@@ -1,10 +1,18 @@
 [package]
 name = "claw-vector"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.75"
 description = "The semantic memory engine for ClawDB — HNSW vector indexing and storage"
 license = "MIT"
+repository   = "https://github.com/Claw-DB/claw-vector"
+homepage     = "https://github.com/Claw-DB/claw-vector"
+documentation = "https://docs.rs/claw-vector"
+readme       = "README.md"
+keywords     = ["database", "agent", "OpenClaw", "sqlite", "ai"]
+categories   = ["database", "embedded"]
+exclude      = ["target/", "benches/", ".github/", "tests/fixtures/"]
+authors = ["Tomiwa Adeyemi"]
 
 [[bin]]
 name = "claw-vector-server"
@@ -15,39 +23,39 @@ name = "claw_vector"
 path = "src/lib.rs"
 
 [dependencies]
-hnsw_rs = "0.3"
-ndarray = { version = "0.16", features = ["serde"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tokio = { version = "1", features = ["full"] }
-tonic = "0.12"
-prost = "0.13"
-thiserror = "1"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-uuid = { version = "1", features = ["v4", "serde"] }
-chrono = { version = "0.4", features = ["serde"] }
+hnsw_rs = "0.3.4"
+ndarray = { version = "0.16.1", features = ["serde"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+tokio = { version = "1.52.1", features = ["full"] }
+tonic = "0.12.3"
+prost = "0.13.5"
+thiserror = "1.0.69"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+uuid = { version = "1.23.1", features = ["v4", "serde"] }
+chrono = { version = "0.4.44", features = ["serde"] }
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "macros", "migrate"] }
-async-trait = "0.1"
-rayon = "1.10"
-byteorder = "1"
-memmap2 = "0.9"
-tokio-stream = "0.1"
-futures = "0.3"
-hex = "0.4"
-lru = "0.12"
-sha2 = "0.10"
-blake3 = "1.5"
+async-trait = "0.1.89"
+rayon = "1.12.0"
+byteorder = "1.5.0"
+memmap2 = "0.9.10"
+tokio-stream = "0.1.18"
+futures = "0.3.32"
+hex = "0.4.3"
+lru = "0.12.5"
+sha2 = "0.10.9"
+blake3 = "1.8.5"
 
 [dev-dependencies]
-tempfile = "3"
-tokio-test = "0.4"
-approx = "0.5"
-criterion = { version = "0.5", features = ["async_tokio"] }
+tempfile = "3.27.0"
+tokio-test = "0.4.5"
+approx = "0.5.1"
+criterion = { version = "0.5.1", features = ["async_tokio"] }
 
 [build-dependencies]
-protoc-bin-vendored = "3"
-tonic-build = "0.12"
+protoc-bin-vendored = "3.2.0"
+tonic-build = "0.12.3"
 
 [[bench]]
 name = "vector_bench"
