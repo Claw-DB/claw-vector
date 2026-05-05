@@ -31,6 +31,15 @@ pub struct VectorEngine {
 }
 
 impl VectorEngine {
+    fn ensure_default_workspace_allowed(&self, operation: &str) -> VectorResult<()> {
+        if self.config.require_workspace_id {
+            return Err(crate::error::VectorError::Config(format!(
+                "{operation} requires explicit workspace_id"
+            )));
+        }
+        Ok(())
+    }
+
     /// Create a new engine using the configured gRPC embedding service.
     #[instrument]
     pub async fn new(config: VectorConfig) -> VectorResult<Self> {
@@ -77,6 +86,7 @@ impl VectorEngine {
         dimensions: usize,
         distance: DistanceMetric,
     ) -> VectorResult<Collection> {
+        self.ensure_default_workspace_allowed("create_collection")?;
         self.collections
             .create_collection(
                 &self.config.default_workspace_id,
@@ -104,6 +114,7 @@ impl VectorEngine {
     /// Delete a collection and all of its persisted state.
     #[instrument(skip(self))]
     pub async fn delete_collection(&self, name: &str) -> VectorResult<()> {
+        self.ensure_default_workspace_allowed("delete_collection")?;
         self.collections
             .delete_collection(&self.config.default_workspace_id, name)
             .await
@@ -122,6 +133,7 @@ impl VectorEngine {
     /// List all collections.
     #[instrument(skip(self))]
     pub async fn list_collections(&self) -> VectorResult<Vec<Collection>> {
+        self.ensure_default_workspace_allowed("list_collections")?;
         self.collections
             .list_collections(&self.config.default_workspace_id)
             .await
@@ -144,6 +156,7 @@ impl VectorEngine {
         text: &str,
         metadata: serde_json::Value,
     ) -> VectorResult<uuid::Uuid> {
+        self.ensure_default_workspace_allowed("upsert")?;
         let vector = self.embedding_client.embed_one(text).await?;
         let record = VectorRecord::new(collection, vector)
             .with_text(text.to_string())
@@ -176,6 +189,7 @@ impl VectorEngine {
         collection: &str,
         items: Vec<(String, serde_json::Value)>,
     ) -> VectorResult<Vec<uuid::Uuid>> {
+        self.ensure_default_workspace_allowed("upsert_batch")?;
         let texts = items
             .iter()
             .map(|(text, _)| text.clone())
@@ -228,6 +242,7 @@ impl VectorEngine {
         vector: Vec<f32>,
         metadata: serde_json::Value,
     ) -> VectorResult<uuid::Uuid> {
+        self.ensure_default_workspace_allowed("upsert_vector")?;
         let record = VectorRecord::new(collection, vector).with_metadata(metadata);
         self.collections
             .insert_vector(&self.config.default_workspace_id, record)
@@ -250,6 +265,7 @@ impl VectorEngine {
     /// Execute ANN search.
     #[instrument(skip(self, query))]
     pub async fn search(&self, query: SearchQuery) -> VectorResult<SearchResponse> {
+        self.ensure_default_workspace_allowed("search")?;
         self.ann_searcher.search(query).await
     }
 
@@ -273,6 +289,7 @@ impl VectorEngine {
         text: &str,
         top_k: usize,
     ) -> VectorResult<SearchResponse> {
+        self.ensure_default_workspace_allowed("search_text")?;
         let vector = self.embedding_client.embed_one(text).await?;
         self.ann_searcher
             .search(SearchQuery {
@@ -318,12 +335,14 @@ impl VectorEngine {
     /// Execute hybrid search.
     #[instrument(skip(self, query))]
     pub async fn hybrid_search(&self, query: HybridQuery) -> VectorResult<SearchResponse> {
+        self.ensure_default_workspace_allowed("hybrid_search")?;
         self.hybrid_searcher.search(query).await
     }
 
     /// Delete a vector record by UUID.
     #[instrument(skip(self))]
     pub async fn delete(&self, collection: &str, id: uuid::Uuid) -> VectorResult<bool> {
+        self.ensure_default_workspace_allowed("delete")?;
         self.collections
             .delete_vector(&self.config.default_workspace_id, collection, id)
             .await
@@ -345,6 +364,7 @@ impl VectorEngine {
     /// Fetch a vector record by UUID.
     #[instrument(skip(self))]
     pub async fn get(&self, collection: &str, id: uuid::Uuid) -> VectorResult<VectorRecord> {
+        self.ensure_default_workspace_allowed("get")?;
         self.collections
             .get_vector(&self.config.default_workspace_id, collection, id)
             .await

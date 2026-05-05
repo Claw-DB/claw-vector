@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import blake3
 import numpy as np
 from fastapi.testclient import TestClient
 
@@ -18,15 +19,25 @@ def _mock_sentence_transformer() -> MagicMock:
 
 
 def test_http_embed_and_health_endpoints() -> None:
-    settings = Settings(MODEL_NAME="test-model", DEVICE="cpu", MAX_BATCH_SIZE=4)
+    settings = Settings(
+        MODEL_NAME="test-model",
+        DEVICE="cpu",
+        MAX_BATCH_SIZE=4,
+        CLAW_VECTOR_API_KEYS=blake3.blake3(b"valid-key").hexdigest(),
+    )
     with patch("claw_vector_svc.embedder.SentenceTransformer", return_value=_mock_sentence_transformer()):
         app = create_app(settings)
         with TestClient(app) as client:
             health = client.get("/health")
             ready = client.get("/ready")
-            info = client.get("/model-info")
-            embed = client.post("/embed", json={"texts": ["hello"], "normalize": True})
-            metrics = client.get("/metrics")
+            headers = {"X-Claw-Api-Key": "valid-key"}
+            info = client.get("/model-info", headers=headers)
+            embed = client.post(
+                "/embed",
+                json={"texts": ["hello"], "normalize": True},
+                headers=headers,
+            )
+            metrics = client.get("/metrics", headers=headers)
 
     assert health.status_code == 200
     assert health.json()["ready"] is True

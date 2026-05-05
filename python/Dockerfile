@@ -44,6 +44,6 @@ USER 1001
 
 EXPOSE 50051 8080
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 CMD curl -fsS http://localhost:8080/health || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 CMD curl -f http://localhost:8080/ready || exit 1
 
 CMD ["uvicorn", "claw_vector_svc.main:app", "--host", "0.0.0.0", "--port", "8080"]

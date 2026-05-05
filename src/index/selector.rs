@@ -1,7 +1,11 @@
 // index/selector.rs — auto-selecting index that migrates from FlatIndex to HnswIndex
 // when the collection surpasses HNSW_THRESHOLD (1 000 vectors).
-use std::path::Path;
+use std::{
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
+use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
 use crate::{
@@ -13,6 +17,20 @@ use crate::{
 
 /// Collection size above which the selector automatically migrates to HNSW.
 pub const HNSW_THRESHOLD: usize = 1_000;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedIndex {
+    index_type: String,
+    points: Vec<(usize, Vec<f32>)>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct IndexManifest {
+    blake3: String,
+    vector_count: u64,
+    dimensions: u32,
+    saved_at_ms: u64,
+}
 
 /// Transparently routes between a [`FlatIndex`] and a [`HnswIndex`].
 pub enum IndexSelector {
@@ -130,20 +148,48 @@ impl IndexSelector {
     pub fn save(&self, dir: &Path, workspace_id: &str, collection: &str) -> VectorResult<()> {
         let col_dir = dir.join(workspace_id).join(collection);
         std::fs::create_dir_all(&col_dir)?;
-        let kind = if self.is_hnsw() { "hnsw" } else { "flat" };
-        std::fs::write(
-            col_dir.join("index.meta.json"),
-            serde_json::to_string(&serde_json::json!({ "index_type": kind }))?,
-        )?;
-        match self {
-            IndexSelector::Flat(flat) => {
-                std::fs::write(
-                    col_dir.join("flat.json"),
-                    serde_json::to_string(&flat.all_vectors()?)?,
-                )?;
+
+        let persisted = match self {
+            IndexSelector::Flat(flat) => PersistedIndex {
+                index_type: "flat".to_string(),
+                points: flat.all_vectors()?,
+            },
+            IndexSelector::Hnsw(hnsw) => PersistedIndex {
+                index_type: "hnsw".to_string(),
+                points: hnsw.snapshot_points()?,
+            },
+        };
+
+        let payload = serde_json::to_vec(&persisted)?;
+        let final_path = idx_file(&col_dir, collection);
+        let tmp_path = idx_tmp_file(&col_dir, collection);
+        std::fs::write(&tmp_path, &payload)?;
+        std::fs::rename(&tmp_path, &final_path)?;
+
+        let saved_at_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or(0);
+        let dimensions = match self {
+            IndexSelector::Flat(flat) => flat.dimensions,
+            IndexSelector::Hnsw(_) => {
+                if persisted.points.is_empty() {
+                    0
+                } else {
+                    persisted.points[0].1.len()
+                }
             }
-            IndexSelector::Hnsw(hnsw) => hnsw.save(&col_dir, collection)?,
-        }
+        };
+        let manifest = IndexManifest {
+            blake3: blake3::hash(&payload).to_hex().to_string(),
+            vector_count: persisted.points.len() as u64,
+            dimensions: dimensions as u32,
+            saved_at_ms,
+        };
+        std::fs::write(
+            idx_manifest_file(&col_dir, collection),
+            serde_json::to_vec_pretty(&manifest)?,
+        )?;
         Ok(())
     }
 
@@ -158,23 +204,63 @@ impl IndexSelector {
         dimensions: usize,
     ) -> VectorResult<Self> {
         let col_dir = dir.join(workspace_id).join(collection);
-        let meta: serde_json::Value =
-            serde_json::from_reader(std::fs::File::open(col_dir.join("index.meta.json"))?)?;
-        match meta["index_type"]
-            .as_str()
-            .ok_or_else(|| VectorError::Index("missing index_type".into()))?
-        {
+        let final_path = idx_file(&col_dir, collection);
+        let tmp_path = idx_tmp_file(&col_dir, collection);
+        let manifest_path = idx_manifest_file(&col_dir, collection);
+
+        if tmp_path.exists() && final_path.exists() {
+            let _ = std::fs::remove_file(&tmp_path);
+        }
+
+        if !manifest_path.exists() {
+            return Err(VectorError::Index("missing index manifest".into()));
+        }
+
+        let manifest: IndexManifest = serde_json::from_slice(&std::fs::read(&manifest_path)?)?;
+        let payload = std::fs::read(&final_path)?;
+        let digest = blake3::hash(&payload);
+        let expected = hex::decode(manifest.blake3)
+            .map_err(|err| VectorError::Index(format!("invalid manifest checksum: {err}")))?;
+        if !constant_time_eq(digest.as_bytes(), &expected) {
+            return Err(VectorError::Index("index checksum mismatch".into()));
+        }
+
+        let persisted: PersistedIndex = serde_json::from_slice(&payload)?;
+        match persisted.index_type.as_str() {
             "flat" => {
-                let vecs: Vec<(usize, Vec<f32>)> =
-                    serde_json::from_str(&std::fs::read_to_string(col_dir.join("flat.json"))?)?;
                 let flat = FlatIndex::new(dimensions, distance);
-                flat.insert_batch(vecs)?;
+                flat.insert_batch(persisted.points)?;
                 Ok(IndexSelector::Flat(flat))
             }
-            "hnsw" => Ok(IndexSelector::Hnsw(Box::new(HnswIndex::load(
-                &col_dir, collection, config, distance,
-            )?))),
+            "hnsw" => {
+                let hnsw = HnswIndex::new_with_dimensions(config, distance, dimensions)?;
+                hnsw.insert_batch(&persisted.points)?;
+                Ok(IndexSelector::Hnsw(Box::new(hnsw)))
+            }
             other => Err(VectorError::Index(format!("unknown index_type '{other}'"))),
         }
     }
+}
+
+fn idx_file(path: &Path, collection: &str) -> PathBuf {
+    path.join(format!("{collection}.idx"))
+}
+
+fn idx_tmp_file(path: &Path, collection: &str) -> PathBuf {
+    path.join(format!("{collection}.idx.tmp"))
+}
+
+fn idx_manifest_file(path: &Path, collection: &str) -> PathBuf {
+    path.join(format!("{collection}.idx.manifest"))
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (a, b) in left.iter().zip(right.iter()) {
+        diff |= a ^ b;
+    }
+    diff == 0
 }

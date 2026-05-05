@@ -337,6 +337,18 @@ impl HnswIndex {
             layers: self.inner.max_level_observed(),
         }
     }
+
+    /// Return a clone of all live points for persistence.
+    pub fn snapshot_points(&self) -> VectorResult<Vec<(usize, Vec<f32>)>> {
+        let points = self
+            .points
+            .read()
+            .map_err(|e| VectorError::Index(e.to_string()))?
+            .iter()
+            .map(|(id, vector)| (*id, vector.clone()))
+            .collect();
+        Ok(points)
+    }
 }
 
 fn index_file(path: &Path, collection_id: &str) -> PathBuf {

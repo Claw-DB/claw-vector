@@ -10,6 +10,7 @@ import grpc
 from grpc_tools import protoc
 import structlog
 
+from claw_vector_svc.auth import hash_api_key
 from claw_vector_svc.config import Settings
 from claw_vector_svc.embedder import EmbedderService
 from claw_vector_svc.metrics import record_embed_request
@@ -63,20 +64,20 @@ class EmbeddingServicer(vector_pb2_grpc.EmbeddingServiceServicer):
     def __init__(
         self,
         embedder: EmbedderService,
-        allowed_keys: set[str],
+        allowed_key_hashes: set[str],
         is_warmup_complete: Callable[[], bool],
     ) -> None:
         self._embedder = embedder
-        self._allowed_keys = allowed_keys
+        self._allowed_key_hashes = allowed_key_hashes
         self._is_warmup_complete = is_warmup_complete
 
     async def _authorize(self, context) -> None:
-        if not self._allowed_keys:
-            return
         metadata = dict(context.invocation_metadata())
-        raw = metadata.get("authorization", "")
+        raw = metadata.get("authorization")
+        if not raw:
+            await context.abort(grpc.StatusCode.UNAUTHENTICATED, "missing authorization")
         api_key = raw.removeprefix("Bearer ").strip()
-        if api_key not in self._allowed_keys:
+        if not api_key or hash_api_key(api_key).lower() not in self._allowed_key_hashes:
             await context.abort(grpc.StatusCode.UNAUTHENTICATED, "invalid API key")
 
     async def _ensure_ready(self, context) -> None:
@@ -155,13 +156,16 @@ class EmbeddingServicer(vector_pb2_grpc.EmbeddingServiceServicer):
 async def start_grpc_server(
     embedder: EmbedderService,
     settings: Settings,
-    allowed_keys: set[str],
     is_warmup_complete: Callable[[], bool],
 ) -> grpc.aio.Server:
     """Start the async gRPC server and return the live server instance."""
     server = grpc.aio.server()
+    raw_hashes = settings.claw_vector_api_keys or settings.claw_api_keys or ""
+    allowed_key_hashes = {
+        value.strip().lower() for value in raw_hashes.split(",") if value.strip()
+    }
     vector_pb2_grpc.add_EmbeddingServiceServicer_to_server(
-        EmbeddingServicer(embedder, allowed_keys, is_warmup_complete),
+        EmbeddingServicer(embedder, allowed_key_hashes, is_warmup_complete),
         server,
     )
     address = f"{settings.grpc_host}:{settings.grpc_port}"

@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from contextlib import asynccontextmanager
 
 import structlog
 import uvicorn
-from fastapi import FastAPI, Header, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
+from claw_vector_svc.auth import get_api_key
 from claw_vector_svc.config import Settings, get_settings, settings as default_settings
 from claw_vector_svc.embedder import EmbedderService
 from claw_vector_svc.grpc_server import start_grpc_server
@@ -33,21 +35,8 @@ from claw_vector_svc.models import (
 log = structlog.get_logger(__name__)
 
 
-def parse_api_keys(settings: Settings) -> set[str]:
-    keys: set[str] = set()
-    if settings.claw_api_key:
-        keys.add(settings.claw_api_key.strip())
-    if settings.claw_api_keys:
-        keys.update(
-            value.strip()
-            for value in settings.claw_api_keys.split(",")
-            if value.strip()
-        )
-    return keys
-
-
 def _api_key_from_request(request: Request) -> str:
-    return request.headers.get("X-Claw-Api-Key", "")
+    return request.headers.get("X-Claw-Api-Key", "anonymous")
 
 
 def _api_key_prefix(api_key: str) -> str:
@@ -58,7 +47,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     if settings is None:
         settings = get_settings()
 
-    allowed_keys = parse_api_keys(settings)
+    if settings.claw_vector_api_keys:
+        os.environ["CLAW_VECTOR_API_KEYS"] = settings.claw_vector_api_keys
+    elif settings.claw_api_keys:
+        os.environ["CLAW_API_KEYS"] = settings.claw_api_keys
+
     limiter = Limiter(key_func=_api_key_from_request)
 
     @asynccontextmanager
@@ -74,7 +67,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.grpc_server = await start_grpc_server(
             embedder,
             settings,
-            allowed_keys,
             lambda: bool(getattr(app.state, "warmup_complete", False)),
         )
 
@@ -104,20 +96,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.limiter = limiter
-    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+    @app.exception_handler(RateLimitExceeded)
+    async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+        response = _rate_limit_exceeded_handler(request, exc)
+        response.headers["Retry-After"] = "60"
+        return response
 
     def current_embedder() -> EmbedderService | None:
         return getattr(app.state, "embedder", None)
 
     def warmup_complete() -> bool:
         return bool(getattr(app.state, "warmup_complete", False))
-
-    def require_api_key(x_claw_api_key: str | None) -> str:
-        if not allowed_keys:
-            return ""
-        if not x_claw_api_key or x_claw_api_key not in allowed_keys:
-            raise HTTPException(status_code=401, detail="invalid API key")
-        return x_claw_api_key
 
     @app.middleware("http")
     async def request_logging_middleware(request: Request, call_next):
@@ -140,13 +130,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
 
     @app.post("/embed", response_model=EmbedResponse, tags=["embeddings"])
-    @limiter.limit(f"{settings.embed_rate_limit_per_minute}/minute")
+    @limiter.limit("200/minute")
     async def embed(
         request: Request,
         req: EmbedRequest,
-        x_claw_api_key: str | None = Header(default=None),
+        api_key: str = Depends(get_api_key),
     ) -> EmbedResponse:
-        api_key = require_api_key(x_claw_api_key)
         _ = api_key
         embedder = current_embedder()
         if embedder is None or not embedder.is_ready or not warmup_complete():
@@ -168,12 +157,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             latency_ms=latency_ms,
         )
 
-    @app.post("/batch-embed", response_model=BatchEmbedResponse, tags=["embeddings"])
+    @app.post("/embed/batch", response_model=BatchEmbedResponse, tags=["embeddings"])
+    @limiter.limit("50/minute")
     async def batch_embed(
+        request: Request,
         req: BatchEmbedRequest,
-        x_claw_api_key: str | None = Header(default=None),
+        api_key: str = Depends(get_api_key),
     ) -> BatchEmbedResponse:
-        require_api_key(x_claw_api_key)
+        _ = request
+        _ = api_key
         embedder = current_embedder()
         if embedder is None or not embedder.is_ready or not warmup_complete():
             raise HTTPException(status_code=503, detail="embedding model is not ready")
@@ -181,30 +173,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail="batch size must be <= 512")
 
         t0 = time.monotonic()
-        vectors: list[EmbedVectorSchema] = []
-        per_batch_latency_ms: list[int] = []
+        vectors: list[list[float]] = []
+        per_batch_latency_ms: list[float] = []
         for start in range(0, len(req.texts), settings.max_batch_size):
             texts = req.texts[start : start + settings.max_batch_size]
             batch_t0 = time.monotonic()
             embedded = await asyncio.to_thread(embedder.embed, texts, req.normalize)
-            per_batch_latency_ms.append(int((time.monotonic() - batch_t0) * 1000))
-            vectors.extend(
-                EmbedVectorSchema(values=vector.tolist(), dimensions=len(vector))
-                for vector in embedded
-            )
+            per_batch_latency_ms.append((time.monotonic() - batch_t0) * 1000.0)
+            vectors.extend(vector.tolist() for vector in embedded)
 
         return BatchEmbedResponse(
             vectors=vectors,
             model_name=embedder.model_name,
-            total_latency_ms=int((time.monotonic() - t0) * 1000),
+            total_latency_ms=(time.monotonic() - t0) * 1000.0,
             per_batch_latency_ms=per_batch_latency_ms,
         )
 
     @app.get("/model-info", response_model=ModelInfoResponse, tags=["embeddings"])
     async def model_info(
-        x_claw_api_key: str | None = Header(default=None),
+        api_key: str = Depends(get_api_key),
     ) -> ModelInfoResponse:
-        require_api_key(x_claw_api_key)
+        _ = api_key
         embedder = current_embedder()
         if embedder is None:
             raise HTTPException(status_code=503, detail="embedding model is not ready")
@@ -216,7 +205,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
     @app.get("/metrics", tags=["metrics"])
-    async def metrics() -> Response:
+    async def metrics(api_key: str = Depends(get_api_key)) -> Response:
+        _ = api_key
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
     app.include_router(make_health_router(current_embedder, warmup_complete))

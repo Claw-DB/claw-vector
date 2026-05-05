@@ -44,3 +44,23 @@ packages = ["python/claw_vector_svc", "python/proto"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["python/tests"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+exclude = [
+    "^python/proto/",
+    "^python/tests/",
+]
+ignore_missing_imports = true
+disable_error_code = [
+    "no-untyped-def",
+    "no-untyped-call",
+    "import-untyped",
+    "import-not-found",
+    "unused-ignore",
+    "misc",
+    "name-defined",
+    "union-attr",
+    "assignment",
+]

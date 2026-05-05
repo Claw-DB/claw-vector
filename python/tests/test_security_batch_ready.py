@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from unittest.mock import MagicMock, patch
 
+import blake3
 import numpy as np
 from fastapi.testclient import TestClient
 
@@ -23,11 +24,12 @@ def _mock_sentence_transformer(dimensions: int = 16) -> MagicMock:
 
 
 def test_embed_requires_valid_api_key() -> None:
+    valid_key = "valid-key"
     settings = Settings(
         MODEL_NAME="test-model",
         DEVICE="cpu",
         MAX_BATCH_SIZE=64,
-        CLAW_API_KEYS="valid-key",
+        CLAW_VECTOR_API_KEYS=blake3.blake3(valid_key.encode()).hexdigest(),
     )
     with patch(
         "claw_vector_svc.embedder.SentenceTransformer",
@@ -39,7 +41,7 @@ def test_embed_requires_valid_api_key() -> None:
             ok = client.post(
                 "/embed",
                 json={"texts": ["x"], "normalize": True},
-                headers={"X-Claw-Api-Key": "valid-key"},
+                headers={"X-Claw-Api-Key": valid_key},
             )
 
     assert bad.status_code == 401
@@ -47,11 +49,12 @@ def test_embed_requires_valid_api_key() -> None:
 
 
 def test_batch_embed_300_texts_across_5_minibatches() -> None:
+    batch_key = "batch-key"
     settings = Settings(
         MODEL_NAME="test-model",
         DEVICE="cpu",
         MAX_BATCH_SIZE=64,
-        CLAW_API_KEYS="batch-key",
+        CLAW_VECTOR_API_KEYS=blake3.blake3(batch_key.encode()).hexdigest(),
     )
     with patch(
         "claw_vector_svc.embedder.SentenceTransformer",
@@ -60,9 +63,9 @@ def test_batch_embed_300_texts_across_5_minibatches() -> None:
         app = create_app(settings)
         with TestClient(app) as client:
             response = client.post(
-                "/batch-embed",
+                "/embed/batch",
                 json={"texts": [f"t-{i}" for i in range(300)], "normalize": True},
-                headers={"X-Claw-Api-Key": "batch-key"},
+                headers={"X-Claw-Api-Key": batch_key},
             )
 
     body = response.json()
@@ -72,10 +75,11 @@ def test_batch_embed_300_texts_across_5_minibatches() -> None:
 
 
 def test_ready_is_503_before_warmup_then_200_after() -> None:
+    warm_key = "warm-key"
     settings = Settings(
         MODEL_NAME="test-model",
         DEVICE="cpu",
-        CLAW_API_KEYS="warm-key",
+        CLAW_VECTOR_API_KEYS=blake3.blake3(warm_key.encode()).hexdigest(),
     )
 
     with patch(
@@ -94,11 +98,11 @@ def test_ready_is_503_before_warmup_then_200_after() -> None:
 
 
 def test_embed_rate_limit_returns_429() -> None:
+    rate_key = "rate-key"
     settings = Settings(
         MODEL_NAME="test-model",
         DEVICE="cpu",
-        CLAW_API_KEYS="rate-key",
-        EMBED_RATE_LIMIT_PER_MINUTE=2,
+        CLAW_VECTOR_API_KEYS=blake3.blake3(rate_key.encode()).hexdigest(),
     )
     with patch(
         "claw_vector_svc.embedder.SentenceTransformer",
@@ -106,11 +110,16 @@ def test_embed_rate_limit_returns_429() -> None:
     ):
         app = create_app(settings)
         with TestClient(app) as client:
-            headers = {"X-Claw-Api-Key": "rate-key"}
-            first = client.post("/embed", json={"texts": ["a"], "normalize": True}, headers=headers)
-            second = client.post("/embed", json={"texts": ["b"], "normalize": True}, headers=headers)
-            third = client.post("/embed", json={"texts": ["c"], "normalize": True}, headers=headers)
+            headers = {"X-Claw-Api-Key": rate_key}
+            responses = [
+                client.post(
+                    "/embed",
+                    json={"texts": [f"t-{idx}"], "normalize": True},
+                    headers=headers,
+                )
+                for idx in range(201)
+            ]
 
-    assert first.status_code == 200
-    assert second.status_code == 200
-    assert third.status_code == 429
+    assert responses[199].status_code == 200
+    assert responses[200].status_code == 429
+    assert "Retry-After" in responses[200].headers

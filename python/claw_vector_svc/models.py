@@ -35,10 +35,10 @@ class BatchEmbedRequest(BaseModel):
 class BatchEmbedResponse(BaseModel):
     """REST batch embedding response payload."""
 
-    vectors: list[EmbedVectorSchema]
+    vectors: list[list[float]]
     model_name: str
-    total_latency_ms: int
-    per_batch_latency_ms: list[int]
+    total_latency_ms: float
+    per_batch_latency_ms: list[float]
 
 
 class HealthResponse(BaseModel):

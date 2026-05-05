@@ -1,10 +1,6 @@
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-    time::Instant,
-};
+use std::{collections::HashMap, num::NonZeroU32, sync::Arc};
 
-use sha2::{Digest, Sha256};
+use governor::{clock::DefaultClock, state::keyed::DashMapStateStore, Quota, RateLimiter};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{
     metadata::MetadataValue, service::interceptor::InterceptedService, transport::Server, Request,
@@ -29,7 +25,7 @@ use crate::{
 
 const WORKSPACE_HEADER: &str = "x-claw-workspace-id";
 const API_KEY_HEADER: &str = "x-claw-api-key";
-const TRACE_HEADER: &str = "x-trace-id";
+const REQUEST_ID_HEADER: &str = "x-request-id";
 
 #[derive(Clone)]
 struct WorkspaceId(String);
@@ -86,11 +82,10 @@ impl EmbeddingService for EmbeddingServiceImpl {
 #[derive(Clone)]
 struct ServerState {
     default_workspace_id: String,
+    require_workspace_id: bool,
     require_auth: bool,
-    default_rate_limit_rps: u32,
     api_keys: Arc<HashMap<String, String>>,
-    workspace_rate_limits: Arc<HashMap<String, u32>>,
-    buckets: Arc<Mutex<HashMap<String, TokenBucket>>>,
+    limiter: Arc<RateLimiter<String, DashMapStateStore<String>, DefaultClock>>,
 }
 
 #[derive(Clone)]
@@ -105,7 +100,14 @@ impl tonic::service::Interceptor for AuthRateTraceInterceptor {
             .get(WORKSPACE_HEADER)
             .and_then(|value| value.to_str().ok())
             .map(ToOwned::to_owned)
-            .unwrap_or_else(|| self.state.default_workspace_id.clone());
+            .or_else(|| {
+                if self.state.require_workspace_id {
+                    None
+                } else {
+                    Some(self.state.default_workspace_id.clone())
+                }
+            })
+            .ok_or_else(|| Status::invalid_argument("missing x-claw-workspace-id"))?;
 
         if self.state.require_auth {
             let api_key = request
@@ -126,65 +128,20 @@ impl tonic::service::Interceptor for AuthRateTraceInterceptor {
             }
         }
 
-        let rate_limit = self
-            .state
-            .workspace_rate_limits
-            .get(&workspace_id)
-            .copied()
-            .unwrap_or(self.state.default_rate_limit_rps)
-            .max(1);
-        {
-            let mut buckets = self
-                .state
-                .buckets
-                .lock()
-                .map_err(|_| Status::internal("rate limiter lock poisoned"))?;
-            let bucket = buckets
-                .entry(workspace_id.clone())
-                .or_insert_with(|| TokenBucket::new(rate_limit));
-            bucket.rate_limit_rps = rate_limit;
-            if !bucket.try_consume(1.0) {
-                return Err(Status::resource_exhausted("rate limit exceeded"));
-            }
+        if self.state.limiter.check_key(&workspace_id).is_err() {
+            return Err(Status::resource_exhausted("rate limit exceeded"));
         }
+
+        let request_id = request
+            .metadata()
+            .get(REQUEST_ID_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
         request.extensions_mut().insert(WorkspaceId(workspace_id));
-        request
-            .extensions_mut()
-            .insert(TraceId(format!("trace-{}", uuid::Uuid::new_v4())));
+        request.extensions_mut().insert(TraceId(request_id));
         Ok(request)
-    }
-}
-
-#[derive(Debug)]
-struct TokenBucket {
-    tokens: f64,
-    last_refill: Instant,
-    rate_limit_rps: u32,
-}
-
-impl TokenBucket {
-    fn new(rate_limit_rps: u32) -> Self {
-        let rate = rate_limit_rps.max(1) as f64;
-        Self {
-            tokens: rate,
-            last_refill: Instant::now(),
-            rate_limit_rps,
-        }
-    }
-
-    fn try_consume(&mut self, cost: f64) -> bool {
-        let now = Instant::now();
-        let elapsed = now.duration_since(self.last_refill).as_secs_f64();
-        let rate = self.rate_limit_rps.max(1) as f64;
-        self.tokens = (self.tokens + elapsed * rate).min(rate);
-        self.last_refill = now;
-        if self.tokens >= cost {
-            self.tokens -= cost;
-            true
-        } else {
-            false
-        }
     }
 }
 
@@ -236,7 +193,7 @@ impl VectorService for VectorServiceImpl {
         let info = collection_to_proto(&created);
         let mut response = Response::new(info);
         if let Some(trace_id) = trace {
-            response.metadata_mut().insert(TRACE_HEADER, trace_id);
+            response.metadata_mut().insert(REQUEST_ID_HEADER, trace_id);
         }
         Ok(response)
     }
@@ -263,7 +220,7 @@ impl VectorService for VectorServiceImpl {
             records_removed: stats.map(|value| value.vector_count).unwrap_or(0),
         });
         if let Some(trace_id) = trace {
-            response.metadata_mut().insert(TRACE_HEADER, trace_id);
+            response.metadata_mut().insert(REQUEST_ID_HEADER, trace_id);
         }
         Ok(response)
     }
@@ -300,7 +257,7 @@ impl VectorService for VectorServiceImpl {
 
         let mut response = Response::new(UpsertResult { id: id.to_string() });
         if let Some(trace_id) = trace {
-            response.metadata_mut().insert(TRACE_HEADER, trace_id);
+            response.metadata_mut().insert(REQUEST_ID_HEADER, trace_id);
         }
         Ok(response)
     }
@@ -387,7 +344,7 @@ impl VectorService for VectorServiceImpl {
 
         let mut response = Response::new(proto);
         if let Some(trace_id) = trace {
-            response.metadata_mut().insert(TRACE_HEADER, trace_id);
+            response.metadata_mut().insert(REQUEST_ID_HEADER, trace_id);
         }
         Ok(response)
     }
@@ -415,7 +372,7 @@ impl VectorService for VectorServiceImpl {
 
         let mut response = Response::new(response);
         if let Some(trace_id) = trace {
-            response.metadata_mut().insert(TRACE_HEADER, trace_id);
+            response.metadata_mut().insert(REQUEST_ID_HEADER, trace_id);
         }
         Ok(response)
     }
@@ -451,7 +408,7 @@ impl VectorService for VectorServiceImpl {
             total: total as u32,
         });
         if let Some(trace_id) = trace {
-            response.metadata_mut().insert(TRACE_HEADER, trace_id);
+            response.metadata_mut().insert(REQUEST_ID_HEADER, trace_id);
         }
         Ok(response)
     }
@@ -480,9 +437,7 @@ fn parse_distance_metric(raw: &str) -> Result<DistanceMetric, Status> {
 }
 
 fn hash_api_key(api_key: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(api_key.as_bytes());
-    hex::encode(hasher.finalize())
+    blake3::hash(api_key.as_bytes()).to_hex().to_string()
 }
 
 async fn load_server_state(config: &VectorConfig) -> Result<Arc<ServerState>, VectorError> {
@@ -500,33 +455,16 @@ async fn load_server_state(config: &VectorConfig) -> Result<Arc<ServerState>, Ve
     .await?;
     let api_keys = key_rows.into_iter().collect::<HashMap<_, _>>();
 
-    let mut workspace_rate_limits = HashMap::new();
-    let has_rate_table = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='workspace_rate_limits'",
-    )
-    .fetch_one(store.pool())
-    .await
-    .unwrap_or(0)
-        > 0;
-    if has_rate_table {
-        let rows = sqlx::query_as::<_, (String, i64)>(
-            "SELECT workspace_id, rate_limit_rps FROM workspace_rate_limits",
-        )
-        .fetch_all(store.pool())
-        .await
-        .unwrap_or_default();
-        for (workspace_id, rps) in rows {
-            workspace_rate_limits.insert(workspace_id, (rps as u32).max(1));
-        }
-    }
+    let rate_limit =
+        NonZeroU32::new(config.rate_limit_rps.max(1)).unwrap_or(NonZeroU32::new(1).unwrap());
+    let limiter = RateLimiter::keyed(Quota::per_second(rate_limit));
 
     Ok(Arc::new(ServerState {
         default_workspace_id: config.default_workspace_id.clone(),
+        require_workspace_id: config.require_workspace_id,
         require_auth: config.require_auth,
-        default_rate_limit_rps: config.rate_limit_rps.max(1),
         api_keys: Arc::new(api_keys),
-        workspace_rate_limits: Arc::new(workspace_rate_limits),
-        buckets: Arc::new(Mutex::new(HashMap::new())),
+        limiter: Arc::new(limiter),
     }))
 }
 
@@ -559,11 +497,12 @@ mod tests {
         AuthRateTraceInterceptor {
             state: Arc::new(ServerState {
                 default_workspace_id: "default".to_string(),
+                require_workspace_id: false,
                 require_auth,
-                default_rate_limit_rps: rate_limit,
                 api_keys: Arc::new(api_keys),
-                workspace_rate_limits: Arc::new(HashMap::new()),
-                buckets: Arc::new(Mutex::new(HashMap::new())),
+                limiter: Arc::new(RateLimiter::keyed(Quota::per_second(
+                    NonZeroU32::new(rate_limit.max(1)).unwrap(),
+                ))),
             }),
         }
     }

@@ -201,11 +201,13 @@ async fn apply_composite_reranker(
     let mut current = results;
     let mut aggregate_scores: HashMap<uuid::Uuid, f32> = HashMap::new();
     let mut by_id: HashMap<uuid::Uuid, SearchResult> = HashMap::new();
+    let mut total_weight = 0.0f32;
 
     for config in configs {
         let reranked = build_reranker(config).rerank(query, current).await?;
         let normalized = normalize_scores(reranked);
         let stage_weight = stage_weight(config);
+        total_weight += stage_weight;
         current = normalized.clone();
 
         for result in normalized {
@@ -217,7 +219,12 @@ async fn apply_composite_reranker(
     let mut final_results = by_id
         .into_iter()
         .filter_map(|(id, mut result)| {
-            let final_score = aggregate_scores.get(&id).copied()?;
+            let denominator = if total_weight <= 0.0 {
+                1.0
+            } else {
+                total_weight
+            };
+            let final_score = aggregate_scores.get(&id).copied()? / denominator;
             result.score = final_score;
             Some(result)
         })
@@ -239,9 +246,10 @@ fn normalize_scores(mut results: Vec<SearchResult>) -> Vec<SearchResult> {
         .iter()
         .map(|result| result.score)
         .fold(f32::NEG_INFINITY, f32::max);
+    let epsilon = 1e-9_f32;
     let range = max_score - min_score;
 
-    if range.abs() < f32::EPSILON {
+    if range.abs() < epsilon {
         for result in &mut results {
             result.score = 1.0;
         }
@@ -249,7 +257,7 @@ fn normalize_scores(mut results: Vec<SearchResult>) -> Vec<SearchResult> {
     }
 
     for result in &mut results {
-        result.score = ((result.score - min_score) / range).clamp(0.0, 1.0);
+        result.score = ((result.score - min_score) / (range + epsilon)).clamp(0.0, 1.0);
     }
     results
 }

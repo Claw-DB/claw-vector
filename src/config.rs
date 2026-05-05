@@ -33,6 +33,8 @@ pub struct VectorConfig {
     pub num_threads: usize,
     /// Default workspace id used when callers do not provide one explicitly.
     pub default_workspace_id: String,
+    /// Require callers to provide workspace ids explicitly.
+    pub require_workspace_id: bool,
     /// SQLite path for API key storage.
     pub api_key_store_path: PathBuf,
     /// Default request budget per workspace in requests/second.
@@ -59,6 +61,7 @@ impl Default for VectorConfig {
                 .unwrap_or(NonZeroUsize::new(4).unwrap())
                 .get(),
             default_workspace_id: "default".into(),
+            require_workspace_id: !cfg!(test),
             api_key_store_path: PathBuf::from("claw_vector_auth.db"),
             rate_limit_rps: 100,
             require_auth: !cfg!(test),
@@ -79,6 +82,7 @@ impl VectorConfig {
     /// - `CLAW_VECTOR_INDEX_DIR`
     /// - `CLAW_EMBEDDING_URL`
     /// - `CLAW_DEFAULT_WORKSPACE_ID`
+    /// - `CLAW_REQUIRE_WORKSPACE_ID`
     /// - `CLAW_API_KEY_STORE_PATH`
     /// - `CLAW_RATE_LIMIT_RPS`
     /// - `CLAW_REQUIRE_AUTH`
@@ -95,6 +99,10 @@ impl VectorConfig {
         }
         if let Ok(v) = std::env::var("CLAW_DEFAULT_WORKSPACE_ID") {
             cfg.default_workspace_id = v;
+        }
+        if let Ok(v) = std::env::var("CLAW_REQUIRE_WORKSPACE_ID") {
+            cfg.require_workspace_id =
+                matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
         }
         if let Ok(v) = std::env::var("CLAW_API_KEY_STORE_PATH") {
             cfg.api_key_store_path = PathBuf::from(v);
@@ -195,6 +203,12 @@ impl VectorConfigBuilder {
     /// Set the default workspace id.
     pub fn default_workspace_id(mut self, workspace_id: impl Into<String>) -> Self {
         self.inner.default_workspace_id = workspace_id.into();
+        self
+    }
+
+    /// Set whether workspace id is mandatory in API calls.
+    pub fn require_workspace_id(mut self, require_workspace_id: bool) -> Self {
+        self.inner.require_workspace_id = require_workspace_id;
         self
     }
 

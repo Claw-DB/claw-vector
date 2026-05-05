@@ -6,7 +6,7 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
 from claw_vector_svc.embedder import EmbedderService
-from claw_vector_svc.models import HealthResponse, ModelInfoResponse, ReadyResponse
+from claw_vector_svc.models import HealthResponse, ReadyResponse
 
 def make_health_router(
     get_embedder: Callable[[], EmbedderService | None],
@@ -33,16 +33,5 @@ def make_health_router(
         if embedder is not None and embedder.is_ready and is_warmup_complete():
             return JSONResponse(ReadyResponse(ready=True).model_dump(), status_code=200)
         return JSONResponse(ReadyResponse(ready=False).model_dump(), status_code=503)
-
-    @router.get("/model-info", response_model=ModelInfoResponse)
-    async def model_info() -> ModelInfoResponse:
-        """Return metadata about the currently loaded embedding model."""
-        embedder = get_embedder()
-        return ModelInfoResponse(
-            model_name=embedder.model_name if embedder else "",
-            dimensions=embedder.dimensions if embedder else 0,
-            max_sequence_length=embedder._settings.max_sequence_length if embedder else 0,
-            device=embedder._settings.device if embedder else "",
-        )
 
     return router

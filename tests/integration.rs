@@ -124,6 +124,7 @@ async fn test_engine(
         .index_dir(tempdir.path().join("indices"))
         .default_dimensions(dimensions)
         .max_elements(200_000)
+        .require_workspace_id(false)
         .build()
         .unwrap();
     VectorEngine::with_embedding_provider(config, provider)
@@ -164,6 +165,85 @@ async fn create_and_list_collections() {
         .map(|collection| collection.name)
         .collect::<Vec<_>>();
     assert_eq!(names, vec!["alpha", "beta", "gamma"]);
+}
+
+#[tokio::test]
+async fn workspace_list_isolation() {
+    let tempdir = TempDir::new().unwrap();
+    let provider = Arc::new(MockEmbeddingClient::new(16));
+    let engine = test_engine(&tempdir, 16, provider).await;
+
+    engine
+        .create_collection_in_workspace("ws-a", "alpha", 16, DistanceMetric::Cosine)
+        .await
+        .unwrap();
+    engine
+        .create_collection_in_workspace("ws-b", "beta", 16, DistanceMetric::Cosine)
+        .await
+        .unwrap();
+
+    let workspace_a = engine.list_collections_in_workspace("ws-a").await.unwrap();
+    let workspace_b = engine.list_collections_in_workspace("ws-b").await.unwrap();
+
+    assert_eq!(workspace_a.len(), 1);
+    assert_eq!(workspace_a[0].name, "alpha");
+    assert_eq!(workspace_b.len(), 1);
+    assert_eq!(workspace_b[0].name, "beta");
+}
+
+#[tokio::test]
+async fn atomic_index_tmp_cleanup_and_restore() {
+    let tempdir = TempDir::new().unwrap();
+    let provider = Arc::new(MockEmbeddingClient::new(8));
+    let engine = test_engine(&tempdir, 8, provider.clone()).await;
+
+    engine
+        .create_collection_in_workspace("ws-a", "docs", 8, DistanceMetric::Cosine)
+        .await
+        .unwrap();
+    for index in 0..8 {
+        engine
+            .upsert_in_workspace("ws-a", "docs", &format!("doc-{index}"), json!({"i": index}))
+            .await
+            .unwrap();
+    }
+    engine.close().await.unwrap();
+
+    let idx_tmp = tempdir
+        .path()
+        .join("indices")
+        .join("ws-a")
+        .join("docs")
+        .join("docs.idx.tmp");
+    let idx = tempdir
+        .path()
+        .join("indices")
+        .join("ws-a")
+        .join("docs")
+        .join("docs.idx");
+    assert!(idx.exists());
+    std::fs::write(&idx_tmp, b"corrupt").unwrap();
+
+    let reopened = test_engine(&tempdir, 8, provider.clone()).await;
+    assert!(!idx_tmp.exists());
+
+    let response = reopened
+        .search_in_workspace(
+            "ws-a",
+            SearchQuery {
+                collection: "docs".to_string(),
+                vector: provider.deterministic_vector("doc-0"),
+                top_k: 3,
+                filter: None,
+                include_vectors: false,
+                include_metadata: true,
+                ef_search: None,
+                reranker: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!response.results.is_empty());
 }
 
 #[tokio::test]
