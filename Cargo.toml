@@ -52,7 +52,7 @@ governor = "0.8.1"
 tempfile = "3.27.0"
 tokio-test = "0.4.5"
 approx = "0.5.1"
-criterion = { version = "0.5.1", features = ["async_tokio"] }
+criterion = { version = "0.8.2", features = ["async_tokio"] }
 
 [build-dependencies]
 protoc-bin-vendored = "3.2.0"
